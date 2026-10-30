@@ -5,8 +5,13 @@
     {
       "id": "douyin",
       "name": "刷抖音",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "description": "用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。",
+      "category": "platform",
+      "tags": [
+        "抖音",
+        "短视频"
+      ],
       "author": "Aurabot",
       "license": "MIT",
       "api": 1,
@@ -21,19 +26,23 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "douyin-v2.0.1",
-      "file": "douyin-v2.0.1.zip",
-      "path": "douyin-v2.0.1/douyin-v2.0.1.zip",
-      "size": 39571,
-      "sha256": "b9e7d2fabcf9819180ec8abf341c34e313b9b2c469ec84034c824ca09f5b0670",
-      "commit": "3b3805f558dd5a04ed41720a83b07cfa6ada43b6",
-      "publishedAt": "2026-10-30T16:12:48.353Z"
+      "tag": "douyin-v2.0.2",
+      "file": "douyin-v2.0.2.zip",
+      "path": "douyin-v2.0.2/douyin-v2.0.2.zip",
+      "size": 39630,
+      "sha256": "abf46f2dafce75f65fe9b93763ecd66568de909c34b6f7c6f4f424c2fe625aa1",
+      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
+      "publishedAt": "2026-10-30T16:25:47.447Z"
     },
     {
       "id": "group-admin",
       "name": "群管",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "主人开口时帮忙管群：禁言、解禁、踢人、改头衔、发公告。她也知道自己在群里有没有管理权限。",
+      "category": "manage",
+      "tags": [
+        "群管"
+      ],
       "author": "Aurabot",
       "license": "MIT",
       "api": 1,
@@ -45,19 +54,24 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "group-admin-v1.0.0",
-      "file": "group-admin-v1.0.0.zip",
-      "path": "group-admin-v1.0.0/group-admin-v1.0.0.zip",
-      "size": 3761,
-      "sha256": "f75257e4141d57fd79f4e8d1a60a13b4dd050efcd4c343f98591163ad9d2384d",
-      "commit": "3b3805f558dd5a04ed41720a83b07cfa6ada43b6",
-      "publishedAt": "2026-10-30T16:12:48.353Z"
+      "tag": "group-admin-v1.0.1",
+      "file": "group-admin-v1.0.1.zip",
+      "path": "group-admin-v1.0.1/group-admin-v1.0.1.zip",
+      "size": 3785,
+      "sha256": "a9402295d814583933609bd1195371f2c428dea1ae738333ce7e94642b19768d",
+      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
+      "publishedAt": "2026-10-30T16:25:47.447Z"
     },
     {
       "id": "heybox",
       "name": "刷小黑盒",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛和扫码登录。",
+      "category": "platform",
+      "tags": [
+        "小黑盒",
+        "游戏"
+      ],
       "author": "Aurabot",
       "license": "MIT",
       "api": 1,
@@ -71,19 +85,23 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "heybox-v1.1.0",
-      "file": "heybox-v1.1.0.zip",
-      "path": "heybox-v1.1.0/heybox-v1.1.0.zip",
-      "size": 36103,
-      "sha256": "04fd6ef56bbef1801af10d26eeb692940620cf7b30b4d06e874ade9c5c194060",
-      "commit": "3b3805f558dd5a04ed41720a83b07cfa6ada43b6",
-      "publishedAt": "2026-10-30T16:12:48.353Z"
+      "tag": "heybox-v1.1.1",
+      "file": "heybox-v1.1.1.zip",
+      "path": "heybox-v1.1.1/heybox-v1.1.1.zip",
+      "size": 36181,
+      "sha256": "2f595c112b8b9874c72d0b54306594345040e2014d32c25d694e0dc813f7e007",
+      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
+      "publishedAt": "2026-10-30T16:25:47.447Z"
     },
     {
       "id": "pet",
       "name": "桌宠",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "把大肥鱼请到桌面上：会冒气泡、做小动作，你在干活时也陪着你。",
+      "category": "desktop",
+      "tags": [
+        "桌宠"
+      ],
       "author": "Aurabot",
       "license": "MIT",
       "api": 1,
@@ -99,15 +117,15 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "pet-v1.0.0",
-      "file": "pet-v1.0.0.zip",
-      "path": "pet-v1.0.0/pet-v1.0.0.zip",
-      "size": 142214,
-      "sha256": "a7ac49bebc7ba0a3628e55d1726699e66cf4ee937f4a3d4389ec62b336b5631f",
-      "commit": "3b3805f558dd5a04ed41720a83b07cfa6ada43b6",
-      "publishedAt": "2026-10-30T16:12:48.353Z"
+      "tag": "pet-v1.0.1",
+      "file": "pet-v1.0.1.zip",
+      "path": "pet-v1.0.1/pet-v1.0.1.zip",
+      "size": 142243,
+      "sha256": "82ee4e283013974cb3a25972523ad42e1adb554ef1c723bf7262790fc0936e64",
+      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
+      "publishedAt": "2026-10-30T16:25:47.447Z"
     }
   ],
   "revoked": [],
-  "generatedAt": "2026-10-30T16:12:48.353Z"
+  "generatedAt": "2026-10-30T16:25:47.447Z"
 }
