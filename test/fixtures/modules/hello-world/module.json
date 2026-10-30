@@ -1,0 +1,12 @@
+{
+  "id": "hello-world",
+  "name": "打招呼",
+  "version": "1.0.0",
+  "description": "收到「你好」时回一句。",
+  "author": "Aurabot contributors",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.1.24",
+  "requires": [],
+  "capabilities": []
+}

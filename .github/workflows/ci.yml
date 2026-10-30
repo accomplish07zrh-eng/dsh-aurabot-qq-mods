@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: npm test
+      - name: 校验模块
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            git fetch -q origin "$BASE_REF"
+            node scripts/check.mjs --base FETCH_HEAD
+          else
+            node scripts/check.mjs
+          fi
+      - name: 跑模块自己的测试
+        run: |
+          for dir in modules/*/; do
+            [ -f "$dir/package.json" ] || continue
+            if node -e "process.exit(require('./$dir/package.json').scripts?.test ? 0 : 1)"; then
+              (cd "$dir" && npm ci --ignore-scripts && npm test)
+            fi
+          done
+      - name: 试打包
+        run: node scripts/pack.mjs --out dist

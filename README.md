@@ -1,8 +1,31 @@
 # dsh-aurabot-qq-mods
 
-Aurabot 插件（[dsh-aurabot-qq](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)）的**素材仓库**。
+Aurabot 插件（[dsh-aurabot-qq](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)）的**社区模块和素材仓库**。
 
-本仓库只放「Aurabot 桌宠」模块用的形象与动画素材，不含插件代码。插件在启动时发现默认素材包缺失，
+```
+modules/<id>/         社区模块，一个模块一个文件夹
+pet-pack/             桌宠默认素材包
+docs/MODULE_SPEC.md   模块格式、发布流程和索引格式
+scripts/              校验、打包、生成索引
+revoked.json          撤回的模块版本
+```
+
+- 想提交模块：看 [贡献指南](CONTRIBUTING.md)。
+- 模块经审核合并后，CI 自动打包发布到 Releases，索引在 `registry` 分支的 `index.json`。
+
+## 许可范围
+
+本仓库内容的许可各不相同：
+
+| 内容 | 许可 |
+|---|---|
+| `pet-pack/` | CC BY-NC-SA 4.0，见根目录 [LICENSE](LICENSE) 和下面的「署名与许可」 |
+| `modules/<id>/` | 各模块文件夹里自己的 `LICENSE` |
+| `scripts/`、`test/`、`docs/`、`.github/` 和仓库说明文档 | MIT，见 [scripts/LICENSE](scripts/LICENSE) |
+
+## 桌宠素材
+
+「Aurabot 桌宠」模块用的形象与动画素材。插件在启动时发现默认素材包缺失，
 会自动从本仓库下载 zip 并落位到本地数据目录，用户无需手动操作。
 
 ## 目录结构
