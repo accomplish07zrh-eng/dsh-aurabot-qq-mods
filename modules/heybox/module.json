@@ -1,0 +1,18 @@
+{
+  "id": "heybox",
+  "name": "刷小黑盒",
+  "version": "1.1.0",
+  "description": "用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛和扫码登录。",
+  "author": "Aurabot",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "network",
+    "filesystem",
+    "plugin-config",
+    "plugin-internals"
+  ],
+  "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq"
+}

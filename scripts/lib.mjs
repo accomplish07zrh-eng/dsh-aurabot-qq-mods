@@ -182,7 +182,7 @@ export function smokeTest(files, m) {
     }
     const entry = entryOf(tmp)
     if (!entry) return ['发布内容里没有入口文件']
-    const script = `const d=(await import(${JSON.stringify(pathToFileURL(join(tmp, entry)).href)})).default;console.log('@@'+JSON.stringify({id:d?.id,version:d?.version,api:d?.api,setup:typeof d?.setup}));process.exit(0)`
+    const script = `globalThis.aurabot={lib:()=>new Proxy({},{get:()=>()=>{}}),src:'file:///'};const d=(await import(${JSON.stringify(pathToFileURL(join(tmp, entry)).href)})).default;console.log('@@'+JSON.stringify({id:d?.id,version:d?.version,api:d?.api,setup:typeof d?.setup}));process.exit(0)`
     let out
     try { out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { cwd: tmp, encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }) } catch (error) { return [`入口加载失败：${String(error.stderr || error.message).slice(0, 500)}`] }
     const got = JSON.parse(out.split('\n').find((l) => l.startsWith('@@')).slice(2))
