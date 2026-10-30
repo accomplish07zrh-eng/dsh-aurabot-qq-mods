@@ -1,0 +1,18 @@
+{
+  "id": "heybox",
+  "name": "刷小黑盒",
+  "version": "1.0.0",
+  "description": "小黑盒游戏社区：看信息流、读帖子热评、点赞、评论、发帖（文章模式可带图）、删自己的帖；发帖前先看热榜找角度（heybox_feed / heybox_watch / heybox_like / heybox_comment / heybox_post / heybox_hot / heybox_search / heybox_topics / heybox_delete）",
+  "author": "Aurabot",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "network",
+    "filesystem",
+    "plugin-config",
+    "plugin-internals"
+  ],
+  "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq"
+}

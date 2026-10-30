@@ -1,0 +1,20 @@
+{
+  "id": "pet",
+  "name": "桌宠",
+  "version": "1.0.0",
+  "description": "桌面悬浮窗桌宠（移植自 dsh-pet，代码 MIT）：主动发言走气泡（可选语音），与 QQ 私聊载体互斥回落",
+  "author": "Aurabot",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "network",
+    "filesystem",
+    "process",
+    "dynamic-code",
+    "plugin-config",
+    "plugin-internals"
+  ],
+  "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq"
+}
