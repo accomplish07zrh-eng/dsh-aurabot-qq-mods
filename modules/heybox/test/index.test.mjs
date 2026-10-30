@@ -23,7 +23,7 @@ test('模块注册面板接口，dispose 中断未完成的请求', async (t) =>
   }
   const hb = mod.setup(api)
   t.after(() => hb.dispose())
-  assert.equal(mod.version, '1.1.0')
+  assert.equal(mod.version, '1.1.1')
   for (const path of ['/heybox/state', '/heybox/risk', '/heybox/risk/clear', '/heybox/qr/start', '/heybox/qr/poll']) assert.equal(typeof routes.get(path), 'function')
   assert.equal(routes.has('/heybox/verify/start'), false)
   const gate = defer()

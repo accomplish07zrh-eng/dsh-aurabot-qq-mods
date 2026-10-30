@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { HeyboxClient, COOLDOWN_STEPS, tierOf } from '../api.mjs'
+import { HeyboxClient, COOLDOWN_STEPS, tierOf } from '../lib/api.mjs'
 import { defer, json, ok } from './helpers.mjs'
 
 test('限速按接口分档并串行执行，等待后重新检查冷却', async () => {

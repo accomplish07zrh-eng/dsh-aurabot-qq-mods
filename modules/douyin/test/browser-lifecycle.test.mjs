@@ -5,12 +5,12 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, writeFileSync, symlinkSync, lstatSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createBrowser, connectCdp } from '../browser.mjs'
+import { createBrowser, connectCdp } from '../lib/browser.mjs'
 
 let createDouyin
 let normalize
 before(async () => {
-  ;({ createDouyin } = await import('../duty.mjs'))
+  ;({ createDouyin } = await import('../lib/duty.mjs'))
   ;({ normalize } = globalThis.aurabot.lib('core/config.js'))
 })
 

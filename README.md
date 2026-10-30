@@ -1,11 +1,17 @@
 # dsh-aurabot-qq-mods
 
-Aurabot 插件（[dsh-aurabot-qq](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)）的**社区模块和素材仓库**。
+Aurabot 插件（[dsh-aurabot-qq](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)）的**模块市场**：面板「模块市场」里能装的模块都在这里。
+
+- 想用模块：在 Aurabot 面板打开「模块市场」，点安装。插件 1.2.0 起支持。
+- 想看有哪些：[模块目录](modules/README.md)。
+- 想写一个：[提交教程](docs/TUTORIAL.md)。
 
 ```
-modules/<id>/         社区模块，一个模块一个文件夹
+modules/<id>/         模块，一个模块一个文件夹，不按分类分层
+modules/README.md     模块目录，按分类排列，自动生成
 pet-pack/             桌宠默认素材包
-docs/MODULE_SPEC.md   模块格式、发布流程和索引格式
+docs/TUTORIAL.md      第一次提交模块的教程
+docs/MODULE_SPEC.md   模块格式、分类、发布流程和索引格式
 scripts/              校验、打包、生成索引
 revoked.json          撤回的模块版本
 ```
