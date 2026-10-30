@@ -1842,6 +1842,7 @@ export default {
       if (!cb.enabled) return { ok: false, reason: 'disabled' }
       if (api.config().enabled === false) return { ok: false, reason: 'plugin-off' }
       if (!chatAllowed(msg.chatId, cb)) return { ok: false, reason: 'not-allowed' }
+      if (msg.userId && String(msg.userId) !== String(api.config().ownerQQ)) return { ok: false, reason: 'not-owner' } // 群里只跟主人联动
       if (!online().online) return { ok: false, reason: 'pet-offline' } // 桌宠不在线没人演
       if (focusOn()) return { ok: false, reason: 'focus' }
       if (chatBusy) return { ok: false, reason: 'thinking' }
