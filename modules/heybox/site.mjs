@@ -3,16 +3,15 @@
 // 几条硬经验（实测踩出来的，别改）：
 //   · 发帖 link_tag：11=文章（富文本、行内插图真正夹在文字中间）、27=图文（图片被挤到文末）、28=动态（只能纯文本）
 //   · topic_ids 必须是真的分区 id（7214 / 18745 / 806933），乱填一直报「错误的帖子类型」
-//   · 帖详情接口频繁访问会触发验证码，还会连坐浏览器会话 → 统一限速 900ms 起
-//   · 搜索接口最容易弹验证码 → 单独拉长间隔，被挡就降级，不阻断主流程
+//   · 帖详情和搜索频繁访问会触发验证码 → 分档限速，遇到风控停止所有普通请求
 //   · 图片走腾讯云 COS 四步直传，任何一步失败都只是少一张图，不打断发帖
 
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
 import { HeyboxClient, HeyboxError, cosSign, WEB_BASE, TOPICS } from './api.mjs'
 import { POST_STYLES, DEFAULT_POST_STYLE, styleOf, stylePrompt } from './styles.mjs'
+import { startQrLogin, pollQrLogin, verifyCookie } from './qr.mjs'
 
 const HOME = process.env.USERPROFILE || os.homedir()
 const CRED_DIR = path.join(HOME, '.heybox-ai')
@@ -20,14 +19,40 @@ const CRED_FILE = path.join(CRED_DIR, 'credentials.json')
 
 const DEFAULT_STATE = {
   account: { checkedAt: 0, nickname: '', heyboxId: '', loggedIn: false, message: '' },
-  quota: { date: '', like: 0, comment: 0, post: 0, browse: 0 },
+  quota: { date: '', like: 0, comment: 0, post: 0, browse: 0, share: 0 },
   history: [],
   lastRun: 0,
   lastSkipReason: '',
+  risk: { level: 0, until: 0, reason: '', at: 0 },
+  failures: 0,
+  retryAt: 0,
+}
+const RETRY_BACKOFF_MS = [2, 5, 15, 30, 60, 120].map((n) => n * 60_000)
+
+export const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+function inHours(hour, start, end) {
+  if (start === end) return false
+  return start < end ? hour >= start && hour < end : hour >= start || hour < end
 }
 
-const today = () => new Date().toISOString().slice(0, 10)
-const nowMs = () => Date.now()
+// 跨午夜时，凌晨归属于前一天开始的峰时段。
+export function isPeakTime(c = {}, at = new Date()) {
+  const h = at.getHours() + at.getMinutes() / 60
+  const ranges = [[c.peakStartAM ?? 9, c.peakEndAM ?? 12], [c.peakStartPM ?? 14, c.peakEndPM ?? 18]]
+  return ranges.some(([a, b]) => {
+    const start = Number(a), end = Number(b)
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !inHours(h, start, end)) return false
+    const day = start > end && h < end ? (at.getDay() + 6) % 7 : at.getDay()
+    return Boolean(c.peakWeekend) || (day !== 0 && day !== 6)
+  })
+}
+
+function pickJson(out) {
+  const text = String(out || '')
+  const a = text.indexOf('{'), b = text.lastIndexOf('}')
+  try { return a >= 0 && b > a ? JSON.parse(text.slice(a, b + 1)) : null } catch { return null }
+}
 
 /** 把 blocks 里的正文抽成纯文本（正文是 JSON 块数组，可能是 text / html / img） */
 function textOf(value) {
@@ -58,49 +83,62 @@ export function linkIdOf(input) {
   return digits.length >= 6 ? digits : ''
 }
 
-export function createHeybox({ getConfig, hub, memory, log }) {
+export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, stateFile = path.join(HOME, '.dsh', 'heybox-state.json'), credFile = CRED_FILE, now = () => Date.now(), clientFactory = (options) => new HeyboxClient(options) }) {
   let client = null
-  let clientCookie = ''
-  let searchAt = 0
+  let qrSession = null
+  let running = false
+  let qrStarting = false
+  let disposed = false
+  const nowMs = () => now()
+  const localToday = () => today(new Date(nowMs()))
 
   /** Cookie 从配置或凭据文件读；配置优先（面板里填的） */
   function cookie() {
     const c = (getConfig().heybox || {}).cookie || ''
     if (c) return String(c).trim()
     try {
-      const j = JSON.parse(fs.readFileSync(CRED_FILE, 'utf8'))
+      const j = JSON.parse(fs.readFileSync(credFile, 'utf8'))
       return Object.entries(j.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ')
     } catch { return '' }
   }
 
+  function hasLogin() { return /(?:^|;\s*)(?:user_)?pkey=[^;\s]+/.test(cookie()) }
+
+  function saveRisk(info) {
+    const st = readState()
+    st.risk = { level: info.level, until: info.until, reason: info.reason, at: info.at }
+    writeState(st)
+  }
+
   function getClient() {
-    const c = cookie()
-    if (!client || c !== clientCookie) {
-      client = new HeyboxClient({ cookie: c })
-      clientCookie = c
-    }
+    if (!client) {
+      client = clientFactory({ cookie: cookie(), risk: readState().risk, onRisk: saveRisk, now })
+      if (disposed) client.dispose()
+    } else client.cookie = cookie()
     return client
   }
+  function risk() { return getClient().riskInfo() }
 
   /** 状态文件：主板数据，掉线也不丢 */
   function readState() {
     try {
-      const raw = JSON.parse(fs.readFileSync(path.join(HOME, '.dsh', 'heybox-state.json'), 'utf8'))
-      return { ...DEFAULT_STATE, ...raw }
+      const raw = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+      return { ...DEFAULT_STATE, ...raw, account: { ...DEFAULT_STATE.account, ...raw.account }, quota: { ...DEFAULT_STATE.quota, ...raw.quota } }
     } catch { return { ...DEFAULT_STATE } }
   }
 
   function writeState(next) {
     try {
-      fs.mkdirSync(path.join(HOME, '.dsh'), { recursive: true })
-      fs.writeFileSync(path.join(HOME, '.dsh', 'heybox-state.json'), JSON.stringify(next, null, 2))
-    } catch (e) { log?.warn?.('写小黑盒状态失败：' + e.message) }
+      fs.mkdirSync(path.dirname(stateFile), { recursive: true })
+      fs.writeFileSync(stateFile, JSON.stringify(next, null, 2))
+      return true
+    } catch (e) { log?.warn?.('写小黑盒状态失败：' + e.message); return false }
   }
 
   function quota() {
     const st = readState()
-    if (st.quota.date !== today()) return { date: today(), like: 0, comment: 0, post: 0, browse: 0 }
-    return st.quota
+    if (st.quota.date !== localToday()) return { date: localToday(), like: 0, comment: 0, post: 0, browse: 0, share: 0 }
+    return { ...DEFAULT_STATE.quota, ...st.quota }
   }
 
   function bump(kind) {
@@ -114,7 +152,7 @@ export function createHeybox({ getConfig, hub, memory, log }) {
 
   function left(kind) {
     const c = getConfig().heybox || {}
-    const cap = { like: c.likeDaily, comment: c.commentDaily, post: c.maxPostsPerDay, browse: c.maxRunsPerDay }[kind] ?? 0
+    const cap = { like: c.likeDaily, comment: c.commentDaily, post: c.maxPostsPerDay, browse: c.maxRunsPerDay, share: c.shareDaily ?? 3 }[kind] ?? 0
     return Math.max(0, (Number(cap) || 0) - (quota()[kind] || 0))
   }
 
@@ -235,16 +273,10 @@ export function createHeybox({ getConfig, hub, memory, log }) {
     }
   }
 
-  /**
-   * 搜索：最容易验证码的接口，单独 8 秒间隔；被挡返回 blocked 而不是抛错，
-   * 好让上层的「写帖流程」降级到「热榜 + 信息流」。
-   */
+  /** 搜索按接口分档限速；遇到风控时提示上层停止所有请求。 */
   async function search(query, limit = 8, { sort = 'award_num', timeRange = '7d' } = {}) {
     const q = String(query || '').trim()
     if (!q) return { ok: false, message: '要给个关键词' }
-    const wait = 8000 - (Date.now() - searchAt)
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait))
-    searchAt = Date.now()
     let d
     try {
       d = await getClient().get('/bbs/app/api/general/search/v1', {
@@ -253,7 +285,8 @@ export function createHeybox({ getConfig, hub, memory, log }) {
         sort_filter: sort, time_range: timeRange,
       })
     } catch (err) {
-      return { ok: false, blocked: true, message: '搜索被小黑盒挡了（' + err.message + '）。这接口查太勤就会要验证码，隔一会儿再试，或者先用 heybox_feed 看信息流找角度。' }
+      if (['captcha', 'cooldown', 'rate_limit'].includes(err.code)) return { ok: false, blocked: true, cooldown: true, message: '小黑盒在冷却中，请先停止请求：' + err.message }
+      return { ok: false, blocked: true, message: '搜索失败：' + err.message }
     }
     const r = d.result || {}
     const items = Array.isArray(r.items) ? r.items : []
@@ -475,12 +508,53 @@ export function createHeybox({ getConfig, hub, memory, log }) {
     return stylePrompt(style || (getConfig().heybox || {}).postStyle, ctx)
   }
 
+  // 分享前同步落盘占额。超时结果不确定，保留占额和帖子记录，避免重复发送。
+  async function shareToOwner(verdict, { owner = '主人' } = {}) {
+    const cfg = getConfig() || {}
+    const c = cfg.heybox || {}
+    if (disposed || !cfg.enabled || cfg.dryRun || c.shareToOwner !== true) return { ok: false, skipped: true, message: '分享未开启或当前不能发送' }
+    const text = String(verdict?.share || '').trim()
+    const id = linkIdOf(verdict?.linkId)
+    if (!text || /^(沉默|［沉默］|（沉默）|\(沉默\)|无|没有|none|null|n\/a)$/i.test(text) || !id) return { ok: false, skipped: true, message: '没有可分享的帖子' }
+    const qq = String(cfg.ownerQQ || '').trim()
+    if (!/^\d+$/.test(qq) || !onebot?.call) return { ok: false, message: '主人 QQ 或网关不可用' }
+    const st = readState()
+    const q = quota()
+    if ((st.sharePending || []).includes(id) || st.history.some((h) => h.kind === 'share' && h.linkId === id && ['pending', 'sent', 'uncertain'].includes(h.status))) return { ok: false, skipped: true, message: '这条帖子已经分享或发送结果待确认' }
+    if (q.share >= Math.max(0, Number(c.shareDaily ?? 3) || 0)) return { ok: false, skipped: true, message: '今天的分享额度用完了' }
+    const entry = { kind: 'share', linkId: id, text: text.slice(0, 60), status: 'pending', at: nowMs() }
+    q.share += 1
+    st.quota = q
+    st.sharePending = [...(st.sharePending || []), id]
+    st.history = [entry, ...st.history].slice(0, 60)
+    if (!writeState(st)) return { ok: false, message: '无法保存分享额度，未发送' }
+    const url = `${WEB_BASE}/app/bbs/link/${id}`
+    let status = 'failed'
+    try {
+      // 宿主 sendText 会在网关层重试；此处只调用一次，超时可能已经送达。
+      const sent = await onebot.call('send_private_msg', { user_id: Number(qq), message: [{ type: 'text', data: { text: `${text}\n${url}` } }] }, { timeoutMs: 30000, retries: 0 })
+      status = sent?.message_id != null ? 'sent' : sent ? 'uncertain' : 'failed'
+    } catch (e) {
+      status = /超时|timeout|timed out|abort/i.test(String(e?.message || e)) ? 'uncertain' : 'failed'
+      log?.warn?.('小黑盒分享失败：' + String(e?.message || e))
+    }
+    const fresh = readState()
+    const item = fresh.history.find((h) => h.kind === 'share' && h.linkId === id && h.status === 'pending' && h.at === entry.at)
+    if (item) item.status = status
+    fresh.sharePending = (fresh.sharePending || []).filter((linkId) => linkId !== id)
+    if (status === 'failed' && fresh.quota.date === q.date) fresh.quota.share = Math.max(0, (Number(fresh.quota.share) || 0) - 1)
+    writeState(fresh)
+    if (status === 'sent') return { ok: true, message: `分享给${owner}了`, linkId: id, url, text }
+    return { ok: false, uncertain: status === 'uncertain', message: status === 'uncertain' ? '发送超时，可能已送达，不再重发' : 'QQ 没发出去' }
+  }
+
   // ── 定时自己逛（只读） ─────────────────────────────────────────
 
   async function browse({ ownerAsked = false, report } = {}) {
     const c = getConfig().heybox || {}
     if (!c.enabled) return { ok: false, message: '小黑盒没打开' }
-    if (!cookie()) return { ok: false, message: '还没登录小黑盒（面板里填 Cookie）' }
+    if (!hasLogin()) return { ok: false, message: '还没登录小黑盒（面板里填 Cookie）' }
+    if (risk().leftMs > 0) return { ok: false, cooling: true, message: '小黑盒在冷却中，请稍后再逛' }
     if (left('browse') <= 0) return { ok: false, message: '今天逛的轮数到上限了' }
     try {
       const list = await feed(0)
@@ -503,72 +577,94 @@ export function createHeybox({ getConfig, hub, memory, log }) {
     }
   }
 
-  // ── 后台会话：定时自己刷（独立 system 会话，带人格，结果不发到 QQ） ──
-  //
-  // 说明（原作者 review 里点到的）：
-  //   · 工具永远跑在「调用它的那个聊天」的会话里，所以要有独立会话就得自己开一个；
-  //   · api.think / hub.runSystemTurn 会建 system:ext-heybox 后台会话，带人格；
-  //   · 记忆是全局一份，但后台 system 会话不会自动带记忆、也不会被提取，
-  //     所以这里手动 recall 拼进 prompt，想留下的再用 memory.add 写回去。
+  // ── 后台会话：先读信息流，再用无工具的独立会话判断要不要分享 ──
+
+  function autoEnabled() {
+    const cfg = getConfig() || {}, c = cfg.heybox || {}
+    return !disposed && Boolean(cfg.enabled) && !cfg.dryRun && Boolean(c.enabled && c.autoBrowse) && hasLogin()
+  }
+
+  function peakText() {
+    const c = getConfig().heybox || {}
+    const hh = (n) => String(n).padStart(2, '0') + ':00'
+    return `${hh(c.peakStartAM ?? 9)}-${hh(c.peakEndAM ?? 12)}、${hh(c.peakStartPM ?? 14)}-${hh(c.peakEndPM ?? 18)}（${c.peakWeekend ? '含周末' : '仅工作日'}）`
+  }
 
   async function runDuty({ memory, owner = '' } = {}) {
+    if (!autoEnabled()) return { ok: false, message: '没开、试运行或没登录' }
     const c = getConfig().heybox || {}
-    if (!c.enabled || !c.autoBrowse || !hasLogin()) return { ok: false, message: '没开或没登录' }
+    if (risk().leftMs > 0) return { ok: false, cooling: true, message: '小黑盒在冷却中' }
+    if (c.offPeakOnly && isPeakTime(c, new Date(nowMs()))) return { ok: false, message: '现在是峰时' }
     if (left('browse') <= 0) return { ok: false, message: '今天逛的轮数到上限了' }
 
-    // 手动把相关记忆拼进 prompt（后台会话不会自动带）
+    const list = (await feed(0)).slice(0, Math.max(1, Number(c.perRun) || 3))
+    if (!autoEnabled() || risk().leftMs > 0) return { ok: false, message: '自动逛已停止' }
     let about = []
-    try {
-      about = memory?.recall?.('小黑盒 游戏 帖子 兴趣', { limit: 6 }) || []
-    } catch { about = [] }
-    const aboutText = (Array.isArray(about) ? about : []).map((m) => '- ' + (m.text || m)).join('\n') || '（暂无）'
-
+    try { about = memory?.recall?.('小黑盒 游戏 帖子 兴趣', { limit: 6 }) || [] } catch { /* 记忆不可用 */ }
+    const bias = c.shareBias === 'stingy' ? '只有特别值得分享才写' : c.shareBias === 'proactive' ? '有趣就可以分享' : '觉得主人会喜欢才分享'
     const prompt = [
-      '【刷小黑盒，不是聊天，这一轮不会发到 QQ】',
-      owner ? `主人是 ${owner}。` : '',
-      `你记得的关于游戏/社区的事：\n${aboutText}`,
-      '先看热榜挑一个游戏相关的题（电竞和商业新闻不适合），再看社区高赞帖在聊什么角度，然后决定这次做什么。',
-      '只读浏览不用征求同意；要发帖、点赞、评论的话，先按你的自检清单过一遍再动手。',
-      '做完用一两句话说说你看了什么、做了什么，别写成报告。',
+      '【刷小黑盒，不是聊天】以下是这轮看到的帖子：',
+      JSON.stringify(list),
+      `关于游戏/社区的记忆：${(Array.isArray(about) ? about : []).map((m) => m.text || m).join('；') || '暂无'}`,
+      `主人是 ${owner || '主人'}。${bias}。只从上面的帖子选择编号。`,
+      '只输出 JSON：{"note":"一两句话说说看到了什么","share":"想分享的一句话，不分享则空","linkId":"分享的帖子编号","remember":"值得记住的事，没有则空"}',
+      c.shareToOwner === true && left('share') > 0 ? '' : '分享关闭或额度已用完，share 留空。',
     ].filter(Boolean).join('\n\n')
-
-    const out = await hub.runSystemTurn('heybox', 'QQ · 刷小黑盒', prompt, { timeoutMs: 240000 })
+    const out = await hub.runSystemTurn('heybox', 'QQ · 刷小黑盒', prompt, { timeoutMs: 240000, noTools: true })
+    if (disposed) return { ok: false, message: '模块已关闭' }
+    const verdict = pickJson(out)
+    const note = String(verdict?.note || out || '').trim()
     bump('browse')
     const st = readState()
     st.lastRun = nowMs()
     st.lastSkipReason = ''
     writeState(st)
-    pushHistory({ kind: 'browse', note: String(out || '').slice(0, 80) })
-
-    // 想留下的东西写进记忆
+    pushHistory({ kind: 'browse', note: note.slice(0, 80) })
+    let shared = null
+    if (verdict && list.some((x) => x.linkId === linkIdOf(verdict.linkId))) shared = await shareToOwner(verdict, { owner: owner || getConfig().ownerName || '主人' })
     try {
-      const t = String(out || '').trim()
-      if (t && t.length > 10) memory?.addEvent?.({ text: `我在小黑盒逛了一圈：${t.slice(0, 120)}`, tags: ['小黑盒'], importance: 0.45 })
+      const t = String(verdict?.remember || note).trim()
+      if (t.length > 10) memory?.addEvent?.({ text: `我在小黑盒逛了一圈：${t.slice(0, 120)}`, tags: ['小黑盒'], importance: 0.45 })
     } catch { /* 记忆模块没在跑就算了 */ }
-
-    return { ok: true, message: String(out || '').slice(0, 300), session: 'system:ext-heybox' }
+    return { ok: true, message: note.slice(0, 300) || '逛完了', shared: shared?.ok ? shared : null, shareError: shared?.ok === false ? shared.message : '', session: 'system:ext-heybox' }
   }
 
   async function tick({ memory, owner } = {}) {
-    const c = getConfig().heybox || {}
-    if (!c.enabled || !c.autoBrowse || !hasLogin()) return
+    if (running || !autoEnabled() || risk().leftMs > 0) return
+    const cfg = getConfig(), c = cfg.heybox || {}, at = new Date(nowMs())
+    const awake = cfg.speakUp || {}
+    if (!inHours(at.getHours() + at.getMinutes() / 60, Number(awake.awakeFrom ?? 8), Number(awake.awakeTo ?? 23))) return
     const st = readState()
-    const gap = (Number(c.intervalHours) || 4) * 3600_000
-    if (st.lastRun && nowMs() - st.lastRun < gap) return
+    if (c.offPeakOnly && isPeakTime(c, at)) {
+      st.lastSkipReason = `峰时（${peakText()}），等谷时再逛`
+      writeState(st)
+      return
+    }
+    if (st.retryAt && nowMs() < st.retryAt) return
+    if (st.lastRun && nowMs() - st.lastRun < (Number(c.intervalHours) || 4) * 3600_000) return
     if (left('browse') <= 0) {
       st.lastSkipReason = '今天逛的轮数到上限了'
       writeState(st)
       return
     }
+    running = true
     try {
       const r = await runDuty({ memory, owner })
-      if (!r.ok) { st.lastSkipReason = r.message; writeState(st) }
-      else log?.info?.('小黑盒后台会话跑完：' + r.message.slice(0, 40))
+      const fresh = readState()
+      fresh.failures = 0
+      fresh.retryAt = 0
+      if (!r.ok) fresh.lastSkipReason = r.message
+      writeState(fresh)
+      if (r.ok) log?.info?.('小黑盒后台会话跑完：' + r.message.slice(0, 40))
     } catch (e) {
-      st.lastSkipReason = e.message
-      writeState(st)
+      const fresh = readState()
+      const n = Math.min(RETRY_BACKOFF_MS.length, (Number(fresh.failures) || 0) + 1)
+      fresh.failures = n
+      fresh.retryAt = nowMs() + RETRY_BACKOFF_MS[n - 1]
+      fresh.lastSkipReason = e.message
+      writeState(fresh)
       log?.warn?.('小黑盒后台会话失败：' + e.message)
-    }
+    } finally { running = false }
   }
 
 
@@ -586,20 +682,23 @@ export function createHeybox({ getConfig, hub, memory, log }) {
       const d = await getClient().get('/account/restore_login')
       const r = d.result || {}
       const profile = r.profile || r.account_detail || {}
+      const heyboxId = String(profile.heybox_id ?? profile.userid ?? r.heybox_id ?? r.account_detail?.userid ?? '')
       const next = {
-        loggedIn: true,
+        loggedIn: Boolean(heyboxId),
         nickname: String(profile.username ?? profile.nickname ?? ''),
-        heyboxId: String(profile.heybox_id ?? r.heybox_id ?? ''),
-        message: '',
+        heyboxId,
+        message: heyboxId ? '' : '接口没有返回账号',
         checkedAt: nowMs(),
       }
-      st.account = next
-      writeState(st)
+      const fresh = readState()
+      fresh.account = next
+      writeState(fresh)
       return { ok: true, ...next }
     } catch (e) {
       const next = { loggedIn: false, nickname: '', heyboxId: '', message: e.message, checkedAt: nowMs() }
-      st.account = next
-      writeState(st)
+      const fresh = readState()
+      fresh.account = next
+      writeState(fresh)
       return { ok: true, ...next }
     }
   }
@@ -607,9 +706,7 @@ export function createHeybox({ getConfig, hub, memory, log }) {
   function saveCookie(raw) {
     const s = String(raw || '').trim()
     if (!s) return { ok: false, message: 'Cookie 是空的' }
-    if (!/pkey=/.test(s)) return { ok: false, message: '这串 Cookie 里没有 pkey，多半没复制全' }
-    clientCookie = s
-    client = null
+    if (!/(?:^|;\s*)(?:user_)?pkey=[^;\s]+/.test(s)) return { ok: false, message: '这串 Cookie 里没有 pkey，多半没复制全' }
     const st = readState()
     st.account = { ...DEFAULT_STATE.account }
     writeState(st)
@@ -618,7 +715,8 @@ export function createHeybox({ getConfig, hub, memory, log }) {
 
   function clearQuota() {
     const st = readState()
-    st.quota = { date: today(), like: 0, comment: 0, post: 0, browse: 0 }
+    if ((st.sharePending || []).length || st.history.some((h) => h.kind === 'share' && h.status === 'pending')) return { ok: false, message: '分享正在发送或结果待确认，暂不能清零' }
+    st.quota = { date: localToday(), like: 0, comment: 0, post: 0, browse: 0, share: 0 }
     writeState(st)
     return { ok: true, message: '今天的小黑盒额度清零了' }
   }
@@ -629,12 +727,83 @@ export function createHeybox({ getConfig, hub, memory, log }) {
     return {
       ...st,
       quota: quota(),
-      limits: { likeDaily: c.likeDaily, commentDaily: c.commentDaily, maxPostsPerDay: c.maxPostsPerDay, maxRunsPerDay: c.maxRunsPerDay },
-      left: { like: left('like'), comment: left('comment'), post: left('post'), browse: left('browse') },
+      limits: { likeDaily: c.likeDaily, commentDaily: c.commentDaily, maxPostsPerDay: c.maxPostsPerDay, maxRunsPerDay: c.maxRunsPerDay, shareDaily: c.shareDaily ?? 3 },
+      left: { like: left('like'), comment: left('comment'), post: left('post'), browse: left('browse'), share: left('share') },
+      peak: { on: Boolean(c.offPeakOnly), now: isPeakTime(c, new Date(nowMs())), text: peakText(), weekend: Boolean(c.peakWeekend) },
+      risk: risk(),
       hasCookie: Boolean(cookie()),
       hasToken: /x_xhh_tokenid=/.test(cookie()),
       topics: TOPICS,
     }
+  }
+
+  // 手动解除只做一次用户主动要求的账号检查。检查过程中出现新的风控或账号改变时不能清除。
+  async function clearRisk() {
+    const current = cookie()
+    if (qrStarting || qrSession?.busy) return { ok: false, message: '扫码正在进行，请稍后验证当前账号' }
+    if (!hasLogin()) return { ok: false, message: '没有可验证的小黑盒账号' }
+    const c = getClient(), token = c.riskToken()
+    try {
+      const result = await verifyCookie(c, current, token)
+      if (!result.verified || disposed || token !== c.riskToken() || current !== cookie()) return { ok: false, verified: false, message: '账号尚未确认可用，冷却保持不变' }
+      return { ok: true, verified: true, message: '账号可用，冷却已解除', risk: c.clearRisk() }
+    } catch (e) { return { ok: false, verified: false, message: '账号验证失败，冷却保持不变：' + e.message, risk: c.riskInfo() } }
+  }
+
+  async function qrStart() {
+    if (disposed) return { ok: false, message: '模块已关闭' }
+    if (qrStarting || qrSession?.busy) return { ok: false, state: 'busy', message: '扫码请求正在进行' }
+    qrStarting = true
+    qrSession = null
+    const c = getClient()
+    try {
+      // 冷却中不发起扫码请求；先等待或由用户主动验证当前账号。
+      const result = await startQrLogin(c)
+      if (disposed) return { ok: false, message: '模块已关闭' }
+      qrSession = { token: result.token, cookies: result.cookies, at: nowMs(), expire: result.expire, riskToken: c.riskToken(), originalCookie: cookie(), busy: false }
+      return { ok: true, png: result.png, qrUrl: result.qrUrl, expire: result.expire, message: '请用小黑盒 App 扫码并确认' }
+    } catch (e) { return { ok: false, message: '拿二维码失败：' + e.message } }
+    finally { qrStarting = false }
+  }
+
+  async function qrPoll() {
+    const session = qrSession
+    if (!session || disposed) return { ok: false, state: 'none', message: '先生成二维码' }
+    if (nowMs() - session.at > session.expire * 1000) {
+      qrSession = null
+      return { ok: false, state: 'expired', message: '二维码已过期' }
+    }
+    if (session.busy) return { ok: false, state: 'busy', message: '正在查询扫码状态' }
+    session.busy = true
+    const c = getClient()
+    try {
+      const r = await pollQrLogin(c, session.token, session.cookies)
+      if (disposed || qrSession !== session) return { ok: false, state: 'cancelled', message: '扫码会话已结束' }
+      session.cookies = r.cookies || session.cookies
+      if (r.state !== 'ok') return { ok: false, state: r.state, message: r.state === 'wait' ? '等待扫码' : r.state === 'ready' ? '等待手机确认' : '扫码状态：' + r.state }
+      if (!r.hasPkey || r.verified !== true) return { ok: false, state: 'unverified', verified: false, message: '扫码账号尚未验证通过：' + (r.verifyError || '未取得可用账号') }
+      if (session.riskToken !== c.riskToken() || session.originalCookie !== cookie()) return { ok: false, state: 'unverified', verified: false, message: '账号或风控状态已改变，请重新开始' }
+      if (typeof setCookie !== 'function') return { ok: false, state: 'save-failed', message: '配置保存接口不可用' }
+      await setCookie(r.cookie)
+      if (disposed || qrSession !== session) return { ok: false, state: 'cancelled', message: '模块已关闭' }
+      saveCookie(r.cookie)
+      // 保存后如果发生了新风控，不得清除新冷却。
+      if (session.riskToken === c.riskToken()) c.clearRisk()
+      qrSession = null
+      return { ok: true, state: 'ok', verified: true, nickname: r.nickname, heyboxId: r.heyboxId, message: '扫码登录成功' }
+    } catch (e) { return { ok: false, state: 'error', message: '查询扫码状态失败：' + e.message } }
+    finally {
+      // 未验证的候选 Cookie 不写入配置，也不保留在扫码会话中。
+      delete session.cookies.pkey
+      delete session.cookies.user_pkey
+      session.busy = false
+    }
+  }
+
+  function dispose() {
+    disposed = true
+    qrSession = null
+    client?.dispose()
   }
 
   log?.info?.('小黑盒模块起来了' + (cookie() ? '' : '（还没填 Cookie）'))
@@ -642,6 +811,7 @@ export function createHeybox({ getConfig, hub, memory, log }) {
   return {
     feed, feedReport, detail, watch, hot, search, topicList,
     like, comment, remove, post, browse, tick, account, saveCookie, clearQuota, state,
+    risk, clearRisk, qrStart, qrPoll, shareToOwner, hasLogin, dispose,
     linkIdOf, postBrief, POST_STYLES, DEFAULT_POST_STYLE, runDuty,
   }
 }
