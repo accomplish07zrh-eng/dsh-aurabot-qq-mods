@@ -13,7 +13,7 @@ export default {
   name: '刷小黑盒',
   version: '1.1.0',
   api: 1,
-  description: '小黑盒游戏社区：看信息流、读帖子热评、点赞、评论、发帖（文章模式可带图）、删自己的帖；发帖前先看热榜找角度（heybox_feed / heybox_watch / heybox_like / heybox_comment / heybox_post / heybox_hot / heybox_search / heybox_topics / heybox_delete）',
+  description: '用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛和扫码登录。',
   tab: 'heybox',
   setup(api) {
     const { hub, http, onebot } = api.core

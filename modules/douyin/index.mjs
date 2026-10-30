@@ -11,7 +11,7 @@ export default {
   name: '刷抖音',
   version: '2.0.1',
   api: 1,
-  description: '专用浏览器刷抖音：看推荐、点赞、评论（可在评论里真·@主人），好玩的分享给主人（抖音私信 / QQ）；别人发来链接能点开看（douyin_watch / douyin_like / douyin_comment / douyin_browse）',
+  description: '用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。',
   tab: 'douyin',
   setup(api) {
     const { hub, http } = api.core

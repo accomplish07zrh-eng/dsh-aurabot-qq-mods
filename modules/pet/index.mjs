@@ -37,7 +37,7 @@ export default {
   version: '1.0.0',
   api: 1,
   api: 1,
-  description: '桌面悬浮窗桌宠（移植自 dsh-pet，代码 MIT）：主动发言走气泡（可选语音），与 QQ 私聊载体互斥回落',
+  description: '把大肥鱼请到桌面上：会冒气泡、做小动作，你在干活时也陪着你。',
 
   defaults: {
     carrier: 'qq', modality: 'text', petFallbackToQQ: true, pack: 'default',

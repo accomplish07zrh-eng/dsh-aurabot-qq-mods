@@ -8,7 +8,7 @@ export default {
   name: '群管',
   version: '1.0.0',
   api: 1,
-  description: '主人要求时禁言 / 解禁 / 踢人 / 改头衔 / 发公告（qq_group_admin）；告诉她自己在群里有没有管理权限',
+  description: '主人开口时帮忙管群：禁言、解禁、踢人、改头衔、发公告。她也知道自己在群里有没有管理权限。',
   setup(api) {
     const { hub, onebot, groupRoles } = api.core
 
