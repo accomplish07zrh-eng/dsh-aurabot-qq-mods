@@ -605,7 +605,11 @@ export function createSite({ browser, log }) {
     const ok = await ensure()
     if (!ok.ok) return ok
     const me = await self()
-    if (me) return { ok: true, loggedIn: true, me }
+    if (me) {
+      const why = await b.evaluate(VERIFY_PROBE)
+      if (typeof why !== 'string') throw new Error('无法确认抖音验证状态')
+      return why ? { ok: true, loggedIn: false, shot: await loginShot() } : { ok: true, loggedIn: true, me }
+    }
     // 右上角「登录」：先做个记号再点（页面看不见时也点得到）
     const marked = await b.evaluate(`(() => {
       const all = [...document.querySelectorAll('button,div,span,a,p')].filter((n) => (n.innerText || '').trim() === '登录' && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().top < 120)
@@ -621,6 +625,10 @@ export function createSite({ browser, log }) {
   /** 扫码中途看一眼：登上了就返回号，没登上就给最新的弹窗截图。 */
   async function loginPoll() {
     if (!b.connected()) return { ok: true, loggedIn: false, shot: '' }
+    // 扫码后仍可能需要短信或安全验证，主人处理完再算登录完成。
+    const why = await b.evaluate(VERIFY_PROBE)
+    if (typeof why !== 'string') throw new Error('无法确认抖音验证状态')
+    if (why) return { ok: true, loggedIn: false, shot: await loginShot() }
     const me = await self().catch(() => null)
     if (me) return { ok: true, loggedIn: true, me }
     return { ok: true, loggedIn: false, shot: await loginShot() }

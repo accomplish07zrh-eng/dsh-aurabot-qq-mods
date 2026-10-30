@@ -40,7 +40,7 @@ test('总开关、dryRun、醒着时间和缺失配置都按语义处理', async
   f.cfg.dryRun = false; f.cfg.speakUp = { awakeFrom: 12, awakeTo: 23 }
   await f.hb.tick(); assert.equal(f.calls.length, 0)
   f.cfg.speakUp = { awakeFrom: 0, awakeTo: 24 }
-  // shareToOwner / offPeakOnly 不存在时默认关，不影响自动逛。
+  // offPeakOnly 缺省关闭，模型没有选择分享时不会发消息。
   await f.hb.tick()
   assert.equal(f.turns.length, 1)
   assert.equal(f.sends.length, 0)
@@ -87,11 +87,11 @@ test('峰时跳过自动逛，不联网、不消耗模型或额度', async (t) =
   assert.equal(f.hb.state().quota.browse, 1)
 })
 
-test('分享默认关闭，先占额防并发；失败回滚，超时不重发', async (t) => {
+test('分享默认开启，先占额防并发；失败回滚，超时不重发', async (t) => {
   const gate = defer()
   const calls = []
   let mode = 'pending'
-  const f = fixture({ onebot: { call: async (...args) => {
+  const f = fixture({ hub: { sendText: async (...args) => {
     calls.push(args)
     if (mode === 'pending') return gate.promise
     if (mode === 'fail') throw new Error('发送失败')
@@ -100,13 +100,14 @@ test('分享默认关闭，先占额防并发；失败回滚，超时不重发',
   } } })
   t.after(() => f.close())
   const verdict = (id) => ({ share: '分享一条游戏帖子', linkId: id })
+  f.cfg.heybox.shareToOwner = false
   assert.equal((await f.hb.shareToOwner(verdict('123456'))).skipped, true)
-  f.cfg.heybox.shareToOwner = true
+  delete f.cfg.heybox.shareToOwner
   f.cfg.heybox.shareDaily = 1
   const first = f.hb.shareToOwner(verdict('123456'))
   assert.equal(f.hb.state().quota.share, 1)
   assert.equal((await f.hb.shareToOwner(verdict('234567'))).skipped, true)
-  assert.deepEqual(calls[0][2], { retries: 0, timeoutMs: 30000 })
+  assert.deepEqual(calls[0], ['private:12345678', '分享一条游戏帖子\nhttps://www.xiaoheihe.cn/app/bbs/link/123456'])
   gate.reject(new Error('发送失败'))
   assert.equal((await first).ok, false)
   assert.equal(f.hb.state().quota.share, 0)
@@ -120,6 +121,35 @@ test('分享默认关闭，先占额防并发；失败回滚，超时不重发',
   f.cfg.heybox.shareDaily = 3
   assert.equal((await f.hb.shareToOwner(verdict('345678'))).skipped, true)
   assert.equal(calls.length, 3)
+})
+
+test('无法确认发送结果时保留额度；明确返回失败时回滚', async (t) => {
+  let result = null
+  const f = fixture({ hub: { sendText: async () => result } })
+  t.after(() => f.close())
+  const verdict = (id) => ({ share: '看看', linkId: id })
+  assert.equal((await f.hb.shareToOwner(verdict('123456'))).uncertain, true)
+  assert.equal(f.hb.state().quota.share, 1)
+  assert.equal((await f.hb.shareToOwner(verdict('123456'))).skipped, true)
+  result = { ok: false }
+  assert.equal((await f.hb.shareToOwner(verdict('234567'))).uncertain, false)
+  assert.equal(f.hb.state().quota.share, 1)
+  result = { message_id: 2 }
+  assert.equal((await f.hb.shareToOwner(verdict('234567'))).ok, true)
+  f.cfg.heybox.enabled = false
+  assert.equal((await f.hb.shareToOwner(verdict('345678'))).skipped, true)
+})
+
+test('分享记录被历史截断后仍不能重复发送', async (t) => {
+  const f = fixture()
+  t.after(() => f.close())
+  assert.equal((await f.hb.shareToOwner({ share: '看看', linkId: '123456' })).ok, true)
+  const { readFileSync, writeFileSync } = await import('node:fs')
+  const state = JSON.parse(readFileSync(f.stateFile, 'utf8'))
+  state.history = Array.from({ length: 60 }, (_, i) => ({ kind: 'browse', at: i }))
+  writeFileSync(f.stateFile, JSON.stringify(state))
+  assert.equal((await f.hb.shareToOwner({ share: '看看', linkId: '123456' })).skipped, true)
+  assert.equal(f.sends.length, 1)
 })
 
 test('并发 tick 只启动一轮，运行期间关掉总开关后不分享', async (t) => {
@@ -139,13 +169,13 @@ test('并发 tick 只启动一轮，运行期间关掉总开关后不分享', as
 
 test('模块重建后未完成的分享继续占额并阻止重发', async (t) => {
   const gate = defer()
-  const f = fixture({ config: { heybox: { shareToOwner: true, shareDaily: 1 } }, onebot: { call: async () => gate.promise } })
+  const f = fixture({ config: { heybox: { shareToOwner: true, shareDaily: 1 } }, hub: { sendText: async () => gate.promise } })
   t.after(() => f.close())
   const first = f.hb.shareToOwner({ share: '看看', linkId: '123456' })
   assert.equal(f.hb.state().quota.share, 1)
   // 同一个状态文件被重新加载时，待确认记录仍然生效。
   const { createHeybox } = await import('../lib/site.mjs')
-  const reloaded = createHeybox({ getConfig: () => f.cfg, stateFile: f.stateFile, credFile: 'missing', onebot: { call: async () => { throw new Error('不应发送') } } })
+  const reloaded = createHeybox({ getConfig: () => f.cfg, stateFile: f.stateFile, credFile: 'missing', hub: { sendText: async () => { throw new Error('不应发送') } } })
   t.after(() => reloaded.dispose())
   assert.equal((await reloaded.shareToOwner({ share: '看看', linkId: '123456' })).skipped, true)
   assert.equal(reloaded.clearQuota().ok, false)

@@ -11,14 +11,14 @@ const { profileToolVisible, profilePermits } = __lib('chat/access.js')
 export default {
   id: 'heybox',
   name: '刷小黑盒',
-  version: '1.1.1',
+  version: '1.1.2',
   api: 1,
-  description: '用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛和扫码登录。',
+  description: '用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛、扫码登录和浏览器验证。',
   tab: 'heybox',
   setup(api) {
-    const { hub, http, onebot } = api.core
+    const { hub, http } = api.core
     const hb = createHeybox({
-      getConfig: api.config, hub, onebot, memory: api.lazy('memory'), log: api.log,
+      getConfig: api.config, hub, memory: api.lazy('memory'), log: api.log,
       setCookie: (cookie) => api.setConfig((cur) => ({ ...cur, heybox: { ...cur.heybox, cookie } })),
     })
 
@@ -143,6 +143,15 @@ export default {
     api.route('/heybox/risk/clear', async () => hb.clearRisk())
     api.route('/heybox/qr/start', async () => hb.qrStart())
     api.route('/heybox/qr/poll', async () => hb.qrPoll())
+    api.route('/heybox/verify/start', async (req) => {
+      const b = await http.body(req).catch(() => ({}))
+      return hb.verifyStart({ visible: Boolean(b?.visible) })
+    })
+    api.route('/heybox/verify/finish', async () => hb.verifyFinish())
+    api.route('/heybox/verify/show', async (req) => {
+      const b = await http.body(req).catch(() => ({}))
+      return hb.verifyShow(b?.visible !== false)
+    })
     return hb
   },
 }

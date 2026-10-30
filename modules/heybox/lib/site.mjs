@@ -12,6 +12,9 @@ import path from 'node:path'
 import { HeyboxClient, HeyboxError, cosSign, WEB_BASE, TOPICS } from './api.mjs'
 import { POST_STYLES, DEFAULT_POST_STYLE, styleOf, stylePrompt } from './styles.mjs'
 import { startQrLogin, pollQrLogin, verifyCookie } from './qr.mjs'
+import { createVerifier } from './verify.mjs'
+
+const { dataDir } = globalThis.aurabot.lib('core/store.js')
 
 const HOME = process.env.USERPROFILE || os.homedir()
 const CRED_DIR = path.join(HOME, '.heybox-ai')
@@ -83,12 +86,16 @@ export function linkIdOf(input) {
   return digits.length >= 6 ? digits : ''
 }
 
-export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, stateFile = path.join(HOME, '.dsh', 'heybox-state.json'), credFile = CRED_FILE, now = () => Date.now(), clientFactory = (options) => new HeyboxClient(options) }) {
+export function createHeybox({ getConfig, setCookie, hub, memory, log, stateFile = path.join(HOME, '.dsh', 'heybox-state.json'), credFile = CRED_FILE, now = () => Date.now(), clientFactory = (options) => new HeyboxClient(options), verifier: injectedVerifier } = {}) {
   let client = null
+  let verifier = injectedVerifier || null
+  let verifySession = null
+  let verifyBusy = false
   let qrSession = null
   let running = false
   let qrStarting = false
   let disposed = false
+  const getVerifier = () => verifier ||= createVerifier({ profileDir: dataDir('heybox', 'edge-profile'), browserPath: () => getConfig().heybox?.browserPath || '', log })
   const nowMs = () => now()
   const localToday = () => today(new Date(nowMs()))
 
@@ -512,15 +519,15 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
   async function shareToOwner(verdict, { owner = '主人' } = {}) {
     const cfg = getConfig() || {}
     const c = cfg.heybox || {}
-    if (disposed || !cfg.enabled || cfg.dryRun || c.shareToOwner !== true) return { ok: false, skipped: true, message: '分享未开启或当前不能发送' }
+    if (disposed || !cfg.enabled || !c.enabled || cfg.dryRun || c.shareToOwner === false) return { ok: false, skipped: true, message: '分享未开启或当前不能发送' }
     const text = String(verdict?.share || '').trim()
     const id = linkIdOf(verdict?.linkId)
     if (!text || /^(沉默|［沉默］|（沉默）|\(沉默\)|无|没有|none|null|n\/a)$/i.test(text) || !id) return { ok: false, skipped: true, message: '没有可分享的帖子' }
     const qq = String(cfg.ownerQQ || '').trim()
-    if (!/^\d+$/.test(qq) || !onebot?.call) return { ok: false, message: '主人 QQ 或网关不可用' }
+    if (!/^\d+$/.test(qq) || typeof hub?.sendText !== 'function') return { ok: false, message: '主人 QQ 或发送接口不可用' }
     const st = readState()
     const q = quota()
-    if ((st.sharePending || []).includes(id) || st.history.some((h) => h.kind === 'share' && h.linkId === id && ['pending', 'sent', 'uncertain'].includes(h.status))) return { ok: false, skipped: true, message: '这条帖子已经分享或发送结果待确认' }
+    if ((st.sharePending || []).includes(id) || (st.shareSeen || []).includes(id) || st.history.some((h) => h.kind === 'share' && h.linkId === id && ['pending', 'sent', 'uncertain'].includes(h.status))) return { ok: false, skipped: true, message: '这条帖子已经分享或发送结果待确认' }
     if (q.share >= Math.max(0, Number(c.shareDaily ?? 3) || 0)) return { ok: false, skipped: true, message: '今天的分享额度用完了' }
     const entry = { kind: 'share', linkId: id, text: text.slice(0, 60), status: 'pending', at: nowMs() }
     q.share += 1
@@ -531,9 +538,9 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
     const url = `${WEB_BASE}/app/bbs/link/${id}`
     let status = 'failed'
     try {
-      // 宿主 sendText 会在网关层重试；此处只调用一次，超时可能已经送达。
-      const sent = await onebot.call('send_private_msg', { user_id: Number(qq), message: [{ type: 'text', data: { text: `${text}\n${url}` } }] }, { timeoutMs: 30000, retries: 0 })
-      status = sent?.message_id != null ? 'sent' : sent ? 'uncertain' : 'failed'
+      // 走正常发送链路让扩展钩子生效。宿主可能把网关超时转成 null，无法确认时保留占额。
+      const sent = await hub.sendText(`private:${qq}`, `${text}\n${url}`)
+      status = sent?.message_id != null ? 'sent' : sent === false || (sent?.ok === false && !sent.uncertain) ? 'failed' : 'uncertain'
     } catch (e) {
       status = /超时|timeout|timed out|abort/i.test(String(e?.message || e)) ? 'uncertain' : 'failed'
       log?.warn?.('小黑盒分享失败：' + String(e?.message || e))
@@ -542,10 +549,11 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
     const item = fresh.history.find((h) => h.kind === 'share' && h.linkId === id && h.status === 'pending' && h.at === entry.at)
     if (item) item.status = status
     fresh.sharePending = (fresh.sharePending || []).filter((linkId) => linkId !== id)
+    if (status !== 'failed') fresh.shareSeen = [...new Set([...(fresh.shareSeen || []), id])]
     if (status === 'failed' && fresh.quota.date === q.date) fresh.quota.share = Math.max(0, (Number(fresh.quota.share) || 0) - 1)
     writeState(fresh)
     if (status === 'sent') return { ok: true, message: `分享给${owner}了`, linkId: id, url, text }
-    return { ok: false, uncertain: status === 'uncertain', message: status === 'uncertain' ? '发送超时，可能已送达，不再重发' : 'QQ 没发出去' }
+    return { ok: false, uncertain: status === 'uncertain', message: status === 'uncertain' ? '发送结果未确认，可能已送达，不再重发' : 'QQ 没发出去' }
   }
 
   // ── 定时自己逛（只读） ─────────────────────────────────────────
@@ -608,7 +616,7 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
       `关于游戏/社区的记忆：${(Array.isArray(about) ? about : []).map((m) => m.text || m).join('；') || '暂无'}`,
       `主人是 ${owner || '主人'}。${bias}。只从上面的帖子选择编号。`,
       '只输出 JSON：{"note":"一两句话说说看到了什么","share":"想分享的一句话，不分享则空","linkId":"分享的帖子编号","remember":"值得记住的事，没有则空"}',
-      c.shareToOwner === true && left('share') > 0 ? '' : '分享关闭或额度已用完，share 留空。',
+      c.shareToOwner !== false && left('share') > 0 ? '' : '分享关闭或额度已用完，share 留空。',
     ].filter(Boolean).join('\n\n')
     const out = await hub.runSystemTurn('heybox', 'QQ · 刷小黑盒', prompt, { timeoutMs: 240000, noTools: true })
     if (disposed) return { ok: false, message: '模块已关闭' }
@@ -740,7 +748,7 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
   // 手动解除只做一次用户主动要求的账号检查。检查过程中出现新的风控或账号改变时不能清除。
   async function clearRisk() {
     const current = cookie()
-    if (qrStarting || qrSession?.busy) return { ok: false, message: '扫码正在进行，请稍后验证当前账号' }
+    if (qrStarting || qrSession?.busy || verifyBusy) return { ok: false, message: '登录验证正在进行，请稍后验证当前账号' }
     if (!hasLogin()) return { ok: false, message: '没有可验证的小黑盒账号' }
     const c = getClient(), token = c.riskToken()
     try {
@@ -752,9 +760,10 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
 
   async function qrStart() {
     if (disposed) return { ok: false, message: '模块已关闭' }
-    if (qrStarting || qrSession?.busy) return { ok: false, state: 'busy', message: '扫码请求正在进行' }
+    if (qrStarting || qrSession?.busy || verifyBusy) return { ok: false, state: 'busy', message: '登录验证正在进行' }
     qrStarting = true
     qrSession = null
+    verifySession = null
     const c = getClient()
     try {
       // 冷却中不发起扫码请求；先等待或由用户主动验证当前账号。
@@ -800,10 +809,73 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
     }
   }
 
+  // 浏览器只提供候选 Cookie；页面无验证框且账号检查明确通过后才保存。
+  async function verifyStart(options = {}) {
+    if (disposed) return { ok: false, message: '模块已关闭' }
+    if (verifyBusy || qrStarting || qrSession?.busy) return { ok: false, state: 'busy', message: '登录验证正在进行' }
+    verifyBusy = true
+    qrSession = null
+    const c = getClient()
+    const session = { riskToken: c.riskToken(), originalCookie: cookie() }
+    verifySession = session
+    try {
+      const r = await getVerifier().begin(options)
+      if (disposed || verifySession !== session) return { ok: false, message: '验证已结束' }
+      if (!r.ok) verifySession = null
+      return r
+    } catch (error) {
+      verifySession = null
+      return { ok: false, message: '打开验证窗口失败：' + error.message }
+    } finally { verifyBusy = false }
+  }
+
+  async function verifyShow(visible = true) {
+    if (disposed || !verifySession) return { ok: false, message: '请先开始浏览器验证' }
+    if (verifyBusy) return { ok: false, state: 'busy', message: '登录验证正在进行' }
+    verifyBusy = true
+    try { return await getVerifier().showWindow(visible) }
+    catch (error) { return { ok: false, message: '调整窗口失败：' + error.message } }
+    finally { verifyBusy = false }
+  }
+
+  async function verifyFinish() {
+    const session = verifySession
+    if (disposed || !session) return { ok: false, verified: false, message: '请先开始浏览器验证' }
+    if (verifyBusy || qrStarting || qrSession?.busy) return { ok: false, state: 'busy', verified: false, message: '登录验证正在进行' }
+    verifyBusy = true
+    const c = getClient()
+    const unchanged = () => !disposed && verifySession === session && session.riskToken === c.riskToken() && session.originalCookie === cookie()
+    try {
+      if (!unchanged()) return { ok: false, verified: false, message: '账号或风控状态已改变，请重新开始' }
+      const r = await getVerifier().finish()
+      if (!r.ok) return r
+      if (!/(?:^|;\s*)(?:user_)?pkey=[^;\s]+/.test(String(r.cookie || ''))) return { ok: false, verified: false, message: '浏览器里没有登录 Cookie' }
+      if (!unchanged()) return { ok: false, verified: false, message: '账号或风控状态已改变，请重新开始' }
+      const check = await verifyCookie(c, r.cookie, session.riskToken)
+      if (!check.verified || !unchanged()) return { ok: false, verified: false, message: '账号尚未确认可用，Cookie 和冷却保持不变' }
+      // 账号检查可能耗时，保存前再看一次页面和 Cookie，防止期间出现新验证或换号。
+      const latest = await getVerifier().finish()
+      if (!latest.ok) return latest
+      if (!unchanged() || latest.cookie !== r.cookie) return { ok: false, verified: false, message: '账号或风控状态已改变，请重新开始' }
+      if (typeof setCookie !== 'function') return { ok: false, verified: false, message: '配置保存接口不可用' }
+      await setCookie(r.cookie)
+      if (disposed || verifySession !== session) return { ok: false, verified: false, message: '验证已结束' }
+      if (session.riskToken !== c.riskToken() || cookie() !== r.cookie) return { ok: false, verified: false, message: '账号或风控状态已改变，冷却保持不变' }
+      saveCookie(r.cookie)
+      c.clearRisk()
+      verifySession = null
+      return { ok: true, verified: true, nickname: check.nickname, heyboxId: check.heyboxId, count: r.count, shot: r.shot, message: '浏览器账号验证成功，Cookie 已保存' }
+    } catch (error) { return { ok: false, verified: false, message: '账号验证失败，Cookie 和冷却保持不变：' + error.message } }
+    finally { verifyBusy = false }
+  }
+
   function dispose() {
+    if (disposed) return
     disposed = true
     qrSession = null
+    verifySession = null
     client?.dispose()
+    verifier?.dispose()
   }
 
   log?.info?.('小黑盒模块起来了' + (cookie() ? '' : '（还没填 Cookie）'))
@@ -811,7 +883,7 @@ export function createHeybox({ getConfig, setCookie, hub, onebot, memory, log, s
   return {
     feed, feedReport, detail, watch, hot, search, topicList,
     like, comment, remove, post, browse, tick, account, saveCookie, clearQuota, state,
-    risk, clearRisk, qrStart, qrPoll, shareToOwner, hasLogin, dispose,
+    risk, clearRisk, qrStart, qrPoll, verifyStart, verifyFinish, verifyShow, shareToOwner, hasLogin, dispose,
     linkIdOf, postBrief, POST_STYLES, DEFAULT_POST_STYLE, runDuty,
   }
 }

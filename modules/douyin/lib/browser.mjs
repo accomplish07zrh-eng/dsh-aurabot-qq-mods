@@ -141,6 +141,7 @@ export function createBrowser({ profileDir, browserPath = () => '', log, now = D
   let cdp = null
   let attaching = null
   let opening = null
+  let openingSource = ''
   let closing = null
   let owned = null
   let generation = 0
@@ -344,11 +345,19 @@ export function createBrowser({ profileDir, browserPath = () => '', log, now = D
     if (closing) await closing
     if (!canStart()) return { ok: false, message: '抖音已关闭，请先打开抖音开关' }
     if (connected()) return { ok: true }
-    if (opening) return opening
+    if (opening) {
+      const pendingSource = openingSource
+      const started = generation
+      const result = await opening
+      // 定时启动被关闭开关取消时，登录不能跟着失败，改由登录来源重新启动。
+      if (source === '登录' && pendingSource !== '登录' && !result.ok && canStart() && generation === started && now() >= retryAt) return open(source, canStart)
+      return result
+    }
     if (now() < retryAt) return { ok: false, message: `${lastError}；浏览器将在 ${Math.ceil((retryAt - now()) / 60_000)} 分钟后重试` }
     const started = generation
     const check = () => { if (generation !== started || !canStart()) throw cancelled() }
     // 延后执行，确保同步抛错也能清除 opening，不会把失败结果一直缓存。
+    openingSource = source
     opening = Promise.resolve().then(async () => {
       try {
         await launch(source, check)
@@ -372,7 +381,7 @@ export function createBrowser({ profileDir, browserPath = () => '', log, now = D
         log?.warn?.(`抖音浏览器启动失败：${lastError}；${delay} 分钟后重试`)
         return { ok: false, message: `${lastError}；浏览器将在 ${delay} 分钟后重试` }
       }
-    }).finally(() => { opening = null })
+    }).finally(() => { opening = null; openingSource = '' })
     return opening
   }
 

@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync, symlinkSync, lstatSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createBrowser, connectCdp } from '../lib/browser.mjs'
+import { createSite } from '../lib/site.mjs'
 
 let createDouyin
 let normalize
@@ -316,6 +317,7 @@ function dutyHarness() {
   const attempts = []
   let closes = 0
   let isOpen = false
+  let clock = 1_000_000
   const fake = {
     open: async (from, canStart) => { attempts.push([from, canStart()]); if (!canStart()) return { ok: false, message: '抖音已关闭' }; isOpen = true; return { ok: true } },
     connected: () => isOpen,
@@ -327,29 +329,119 @@ function dutyHarness() {
       return ''
     },
   }
-  const dy = createDouyin({ getConfig: () => cfg, browser: fake, hub: {}, log: { info() {}, warn() {}, debug() {} } })
-  return { cfg, dy, attempts, closes: () => closes }
+  const dy = createDouyin({ getConfig: () => cfg, browser: fake, hub: {}, now: () => clock, log: { info() {}, warn() {}, debug() {} } })
+  return { cfg, dy, attempts, closes: () => closes, advance: (ms) => { clock += ms } }
 }
 
-test('定时、主人操作、登录分别传递启动来源，关闭开关后定时任务关浏览器且不再启动', async () => {
+test('定时、主人操作、登录分别传递来源；关闭开关时保护登录，超时后关闭', async () => {
   const h = dutyHarness()
   await h.dy.tick()
   assert.deepEqual(h.attempts[0], ['定时', true])
   await h.dy.watch('7000000000000000001')
   assert.deepEqual(h.attempts[1], ['主人要求', true])
+  h.cfg.douyin.enabled = false
   await h.dy.loginStep(true)
   assert.deepEqual(h.attempts[2], ['登录', true])
-  h.cfg.douyin.enabled = false
+  await h.dy.tick()
+  assert.equal(h.closes(), 0)
+  assert.equal(h.dy.state().browserOpen, true)
+  h.advance(5 * 60_000 - 1)
+  await h.dy.tick()
+  assert.equal(h.closes(), 0)
+  h.advance(1)
   await h.dy.tick()
   assert.equal(h.closes(), 1)
   assert.equal(h.dy.state().browserOpen, false)
   await h.dy.tick()
   assert.equal(h.attempts.length, 3)
   await h.dy.account(true)
-  assert.deepEqual(h.attempts[3], ['登录', false])
+  assert.deepEqual(h.attempts[3], ['登录', true])
   h.dy.dispose()
   await new Promise((r) => setImmediate(r))
   assert.equal(h.closes(), 3, '模块卸载也会清理')
+})
+
+test('定时启动中关开关并开始登录，取消定时启动后会用登录来源重试', async () => {
+  process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'dy-login-handoff-'))
+  const cfg = normalize({ enabled: true, douyin: { enabled: true, autoBrowse: true, ownerDm: false, perRun: 1 } })
+  cfg.speakUp.awakeFrom = 0
+  cfg.speakUp.awakeTo = 24
+  const gate = deferred()
+  const h = harness({ mode: 'success', wait: () => gate.promise })
+  const dy = createDouyin({ getConfig: () => cfg, browser: h.browser, hub: {}, log: { info() {}, warn() {}, debug() {} } })
+  const scheduled = dy.tick()
+  await new Promise((r) => setImmediate(r))
+  cfg.douyin.enabled = false
+  const login = dy.loginStep(true)
+  await dy.tick()
+  gate.resolve()
+  await scheduled
+  await login
+  assert.equal(h.children.length, 2)
+  assert.deepEqual(h.kills, [['group', 1000, 'SIGKILL']])
+  assert.equal(h.browser.connected(), true)
+  await h.browser.close()
+})
+
+test('登录动作进行中和最近五分钟保护浏览器；轮询、显示窗口会刷新保护期', async () => {
+  process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'dy-login-grace-'))
+  const cfg = normalize({ enabled: true, douyin: { enabled: false } })
+  const gate = deferred(), started = deferred()
+  let clock = 1000, closes = 0
+  const site = {
+    connected: () => true, close: async () => { closes++ },
+    loginStart: async () => { started.resolve(); return gate.promise },
+    loginPoll: async () => ({ ok: true, loggedIn: true, me: { secUid: 'me', nickname: '她' } }),
+    ensure: async () => ({ ok: true }), show: async () => {},
+  }
+  const dy = createDouyin({ getConfig: () => cfg, site, hub: {}, now: () => clock, log: { warn() {} } })
+  const pending = dy.loginStep(true)
+  await started.promise
+  clock += 10 * 60_000
+  await dy.tick()
+  assert.equal(closes, 0)
+  gate.resolve({ ok: true, loggedIn: false, shot: 'QR' })
+  await pending
+  clock += 4 * 60_000
+  await dy.loginStep(false)
+  clock += 4 * 60_000
+  assert.equal((await dy.showWindow(true)).ok, true)
+  clock += 5 * 60_000 - 1
+  await dy.tick()
+  assert.equal(closes, 0)
+  clock++
+  await dy.tick()
+  assert.equal(closes, 1)
+})
+
+test('扫码后仍有验证或探测失败时不宣告登录完成', async () => {
+  let why = '请完成安全验证', selfCalls = 0
+  const site = createSite({ browser: {
+    connected: () => true, open: async () => ({ ok: true }),
+    evaluate: async (expression) => {
+      if (expression === 'location.href') return 'https://www.douyin.com/'
+      if (expression.includes('captcha_container')) {
+        if (why instanceof Error) throw why
+        return why
+      }
+      if (expression.includes('/aweme/v1/web/user/profile/self/')) {
+        selfCalls++
+        return { status: 200, text: JSON.stringify({ status_code: 0, user: { sec_uid: 'me', nickname: '她' } }) }
+      }
+      return null
+    },
+    screenshot: async () => 'data:image/png;base64,QR',
+  } })
+  assert.equal((await site.loginPoll()).loggedIn, false)
+  assert.equal(selfCalls, 0)
+  assert.equal((await site.loginStart()).loggedIn, false)
+  assert.equal(selfCalls, 1)
+  why = new Error('探测失败')
+  await assert.rejects(site.loginPoll(), /探测失败/)
+  assert.equal(selfCalls, 1)
+  why = ''
+  assert.equal((await site.loginPoll()).loggedIn, true)
+  assert.equal(selfCalls, 2)
 })
 
 test('定时启动中关闭开关会取消启动并清理自有进程，之后的 tick 不再启动', async () => {
