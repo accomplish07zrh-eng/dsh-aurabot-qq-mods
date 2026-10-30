@@ -16,6 +16,7 @@ const clip = (t, max) => [...String(t ?? '').replace(/\s+/g, ' ').trim()].slice(
 // 这些错误说明今天别再动手了：验证码、操作太频繁、账号被限制
 const STOP_RE = /验证|频繁|稍后再试|异常|限制|风控/
 const NAME = { like: '点赞', comment: '评论' }
+const LOGIN_GRACE_MS = 5 * 60_000
 
 /** 从模型输出里取 JSON（对象或数组），取不到返回 fallback。 */
 export function pickJson(out, fallback) {
@@ -41,8 +42,11 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
   const sleep = wait || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const source = new AsyncLocalStorage()
   const browser = injectedBrowser || (injected ? null : createBrowser({ profileDir: dataDir('douyin', 'edge-profile'), browserPath: () => cfg().browserPath, log, now }))
-  // 每个调用各自带上来源，并在真正启动前再次检查开关。
-  const site = injected || createSite({ browser: { ...browser, open: () => browser.open(source.getStore() || '主人要求', () => cfg().enabled) }, log })
+  // 登录可以在开关关闭时进行；其他来源仍在真正启动前检查开关。
+  const site = injected || createSite({ browser: { ...browser, open: () => {
+    const from = source.getStore() || '主人要求'
+    return browser.open(from, () => from === '登录' || cfg().enabled)
+  } }, log })
   const file = () => dataDir('douyin.json')
   const load = () => {
     const raw = readJson(file(), emptyState)
@@ -60,6 +64,14 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
   }
   const paused = (s) => s.pauseDay === dayKey(new Date(now()))
   let busy = false
+  let loginBusy = 0
+  let loginActionAt = null
+  const loginRecent = () => loginActionAt !== null && now() - loginActionAt < LOGIN_GRACE_MS
+  async function loginAction(fn) {
+    loginBusy++
+    loginActionAt = now()
+    try { return await fn() } finally { loginActionAt = now(); loginBusy-- }
+  }
 
   // 刚登录的号前几天上限减半：新号一上来就猛点赞猛评论最容易被风控
   const isNew = (s) => {
@@ -645,7 +657,8 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     const g = getConfig()
     const c = g.douyin
     if (!c.enabled) {
-      // 即使正在刷或正在启动，也要先关掉本实例启动的浏览器。
+      // 登录中或刚有登录动作时留出时间扫码和手动验证；其他任务仍要关闭。
+      if (loginBusy || loginRecent()) return
       try { await (browser || site).close?.() } catch (error) { log.warn('关闭抖音浏览器失败：', error.message) }
       return
     }
@@ -668,43 +681,50 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
   async function account(force = false) {
     const s = load()
     if (!force) return s.account || { loggedIn: false, unknown: true }
-    try {
-      const r = await ready(s, '登录')
-      return { ...(s.account || { loggedIn: false }), ...(r.ok ? {} : { message: r.message }) }
-    } catch (error) {
-      return { loggedIn: false, error: error.message }
-    } finally {
-      save(s)
-    }
+    return loginAction(async () => {
+      try {
+        const r = await ready(s, '登录')
+        return { ...(s.account || { loggedIn: false }), ...(r.ok ? {} : { message: r.message }) }
+      } catch (error) {
+        return { loggedIn: false, error: error.message }
+      } finally {
+        save(s)
+      }
+    })
   }
 
   /** 扫码登录：开始 / 轮询。返回 { loggedIn, shot }（shot 是登录弹窗截图）。 */
   async function loginStep(start) {
-    const s = load()
-    try {
-      const r = await source.run('登录', () => (start ? site.loginStart() : site.loginPoll()))
-      if (!r.ok) return r
-      if (r.loggedIn) {
-        s.account = { at: now(), loggedIn: true, nickname: r.me.nickname, secUid: r.me.secUid, error: '' }
-        if (!s.loginAt) s.loginAt = now()
-        if (paused(s) && /登录/.test(s.pauseReason)) s.pauseDay = ''
-        await site.show(false).catch(() => {})
-        return { ok: true, loggedIn: true, message: `已登录：${r.me.nickname}` }
+    return loginAction(async () => {
+      const s = load()
+      try {
+        const r = await source.run('登录', () => (start ? site.loginStart() : site.loginPoll()))
+        if (!r.ok) return r
+        if (r.loggedIn) {
+          s.account = { at: now(), loggedIn: true, nickname: r.me.nickname, secUid: r.me.secUid, error: '' }
+          if (!s.loginAt) s.loginAt = now()
+          if (paused(s) && /登录/.test(s.pauseReason)) s.pauseDay = ''
+          await site.show(false).catch(() => {})
+          return { ok: true, loggedIn: true, message: `已登录：${r.me.nickname}` }
+        }
+        return { ok: true, loggedIn: false, shot: r.shot, message: '用抖音 App 扫码；扫完要验证的话点「显示浏览器窗口」在窗口里完成' }
+      } catch (error) {
+        return { ok: false, message: error.message }
+      } finally {
+        save(s)
       }
-      return { ok: true, loggedIn: false, shot: r.shot, message: '用抖音 App 扫码；扫完要验证的话点「显示浏览器窗口」在窗口里完成' }
-    } catch (error) {
-      return { ok: false, message: error.message }
-    } finally {
-      save(s)
-    }
+    })
   }
 
   /** 把浏览器窗口挪到屏幕里给人看（处理验证码、短信验证）/ 挪回去。 */
   async function showWindow(visible) {
-    const r = await source.run('主人要求', () => site.ensure())
-    if (!r.ok) return r
-    await site.show(Boolean(visible))
-    return { ok: true, message: visible ? '浏览器窗口挪到屏幕上了，处理完点「收起窗口」' : '窗口收起来了' }
+    const show = async (from) => {
+      const r = await source.run(from, () => site.ensure())
+      if (!r.ok) return r
+      await site.show(Boolean(visible))
+      return { ok: true, message: visible ? '浏览器窗口挪到屏幕上了，处理完点「收起窗口」' : '窗口收起来了' }
+    }
+    return loginBusy || loginRecent() ? loginAction(() => show('登录')) : show('主人要求')
   }
 
   /** 面板读的状态。只读文件，不碰浏览器。 */
