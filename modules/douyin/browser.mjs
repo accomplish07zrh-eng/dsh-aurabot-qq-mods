@@ -3,8 +3,8 @@
 // 不用无头模式：抖音会拦无头浏览器（页面一直「加载中」）。Linux 没桌面就配 Xvfb。
 
 import { createServer } from 'node:net'
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
+import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -85,15 +85,25 @@ export function connectCdp(wsUrl, { WS = globalThis.WebSocket } = {}) {
       for (const fn of listeners.get(msg.method) || []) try { fn(msg.params || {}) } catch (error) {}
     }
   })
+  let finishReady = () => {}
   sock.addEventListener('close', () => {
     closed = true
+    finishReady(new Error('浏览器连接断了'))
     for (const p of pending.values()) p.reject(new Error('浏览器连接断了'))
     pending.clear()
   })
   const ready = new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('连不上浏览器调试端口')), 10000)
-    sock.addEventListener('open', () => { clearTimeout(t); resolve() })
-    sock.addEventListener('error', () => { clearTimeout(t); reject(new Error('连不上浏览器调试端口')) })
+    let done = false
+    const t = setTimeout(() => finishReady(new Error('连不上浏览器调试端口')), 10000)
+    finishReady = (error) => {
+      if (done) return
+      done = true
+      clearTimeout(t)
+      if (error) reject(error)
+      else resolve()
+    }
+    sock.addEventListener('open', () => finishReady())
+    sock.addEventListener('error', () => finishReady(new Error('连不上浏览器调试端口')))
   })
   return {
     ready,
@@ -104,7 +114,7 @@ export function connectCdp(wsUrl, { WS = globalThis.WebSocket } = {}) {
       return new Promise((resolve, reject) => {
         const t = setTimeout(() => { pending.delete(id); reject(new Error(`浏览器没响应（${method}）`)) }, ms)
         pending.set(id, { resolve: (v) => { clearTimeout(t); resolve(v) }, reject: (e) => { clearTimeout(t); reject(e) } })
-        sock.send(JSON.stringify({ id, method, params }))
+        try { sock.send(JSON.stringify({ id, method, params })) } catch (error) { pending.delete(id); clearTimeout(t); reject(error) }
       })
     },
     on(method, fn) {
@@ -116,83 +126,253 @@ export function connectCdp(wsUrl, { WS = globalThis.WebSocket } = {}) {
   }
 }
 
+/** Windows 按进程树关闭；只传入本次 spawn 返回的进程号。 */
+function windowsKillTree(pid) {
+  return new Promise((resolve) => {
+    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, (error) => resolve(!error))
+  })
+}
+
 /**
  * 专用浏览器。open() 才会真的启动 / 连接；只读状态的地方不要调它（打开面板不该弹窗口）。
- * @param {{profileDir:string, browserPath?:()=>string, log?:object}} o
+ * 只接回本实例启动的进程：旧端口文件和 SingletonLock 都不能证明其他进程是我们的。
  */
-export function createBrowser({ profileDir, browserPath = () => '', log } = {}) {
+export function createBrowser({ profileDir, browserPath = () => '', log, now = Date.now, spawnProcess = spawn, getPort = freePort, getBrowserJson = getJson, connect = connectCdp, wait = sleep, platform = process.platform, killGroup = (pid, signal) => process.kill(-pid, signal), killTree = windowsKillTree, stopWaitMs = 3000, stderrWaitMs = 250 } = {}) {
   let cdp = null
+  let attaching = null
   let opening = null
+  let closing = null
+  let owned = null
+  let generation = 0
+  let failures = 0
+  let retryAt = 0
+  let lastError = ''
 
-  const connected = () => Boolean(cdp && !cdp.closed)
+  const connected = () => Boolean(owned && !owned.exited && !owned.needsStop && cdp && !cdp.closed)
+  const cancelled = () => Object.assign(new Error('抖音已关闭，请先打开抖音开关'), { code: 'cancelled' })
+  const lockError = () => new Error('抖音浏览器资料目录被占用（SingletonLock / profile appears to be in use），请先关闭占用该目录的浏览器')
 
-  async function attach(port) {
-    const { page, extra } = pickPage(await getJson(`http://127.0.0.1:${port}/json/list`))
-    for (const t of extra) await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`).catch(() => {})
-    let target = page
-    if (!target) target = await getJson(`http://127.0.0.1:${port}/json/new?about:blank`).catch(() => null)
-    if (!target?.webSocketDebuggerUrl) throw new Error('浏览器里没有能控制的标签页')
-    const c = connectCdp(target.webSocketDebuggerUrl)
-    await c.ready
-    await c.send('Page.enable')
-    await c.send('Runtime.enable')
-    await c.send('Network.enable', { maxResourceBufferSize: 20e6, maxTotalBufferSize: 100e6 })
-    await c.send('Page.setMuted', { muted: true }).catch(() => {}) // 老版本没有这个命令，静音再靠 --mute-audio
-    cdp = c
-  }
-
-  async function launch() {
-    const bin = findBrowser(browserPath())
-    if (!bin) return { ok: false, message: browserPath() ? `浏览器路径不对：${browserPath()}` : '找不到 Edge / Chrome，先装一个，或在面板里填浏览器路径' }
-    mkdirSync(profileDir, { recursive: true })
-    const port = await freePort()
-    const child = spawn(bin, [
-      `--user-data-dir=${profileDir}`,
-      `--remote-debugging-port=${port}`,
-      '--remote-debugging-address=127.0.0.1',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--mute-audio',
-      '--autoplay-policy=no-user-gesture-required',
-      // 窗口在屏幕外也照常播放视频、跑页面脚本（不然会被当成后台窗口限速）
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--disable-features=Translate,MediaRouter,CalculateNativeWinOcclusion',
-      '--window-size=1280,860',
-      '--window-position=-2400,-2400', // 放到屏幕外，不抢前台；要看的时候 show()
-      'about:blank',
-    ], { stdio: 'ignore', detached: true })
-    child.on('error', (error) => log?.warn?.('浏览器启动失败：', error.message))
-    child.unref()
-    for (let i = 0; i < 60; i++) {
-      await sleep(250)
-      if (await getJson(`http://127.0.0.1:${port}/json/version`, 1500).catch(() => null)) {
-        // Edge 经常不写这个文件，自己写一份，DSH 重启后才能接回这个窗口
-        try { writeFileSync(join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/aurabot\n`) } catch (error) {}
-        await attach(port)
-        return { ok: true }
-      }
+  // Linux 的 SingletonLock 往往是指向不存在路径的符号链接，existsSync 会漏掉。
+  function hasLock() {
+    try { lstatSync(join(profileDir, 'SingletonLock')); return true } catch (error) {
+      if (error.code === 'ENOENT') return false
+      throw error
     }
-    return { ok: false, message: '浏览器没起来。可能这个专用资料目录被另一个 Edge 窗口占着（不是插件开的那种），关掉它再试' }
   }
 
-  /** 连上专用浏览器：已经开着就接回去，没开就启动一个（屏幕外）。 */
-  async function open() {
-    if (connected()) return { ok: true }
-    if (opening) return opening
-    opening = (async () => {
-      const port = readPortFile(profileDir)
-      if (port && await getJson(`http://127.0.0.1:${port}/json/version`, 1500).catch(() => null)) {
-        try {
-          await attach(port)
-          return { ok: true }
-        } catch (error) {
-          log?.debug?.('接回已开的浏览器失败，重新启动：', error.message)
+  function observe(child, port) {
+    let done
+    let outputDone
+    const p = { child, port, exited: false, error: null, stderr: '', done: new Promise((resolve) => { done = resolve }), outputClosed: false, outputDone: new Promise((resolve) => { outputDone = resolve }), stopping: null, needsStop: false, terminate: null }
+    child.on('error', (error) => {
+      p.error = error
+      if (!child.pid) { p.exited = true; done() }
+    })
+    child.once('exit', () => {
+      p.exited = true
+      done()
+      if (owned === p) { attaching?.close(); cdp?.close(); cdp = null }
+    })
+    child.once('close', () => { p.outputClosed = true; outputDone() })
+    child.stderr?.on('data', (data) => { p.stderr = (p.stderr + String(data)).slice(-4000) })
+    child.stderr?.on('error', () => {})
+    child.stderr?.unref?.()
+    return p
+  }
+
+  function waitExit(p, ms) {
+    if (p.exited) return Promise.resolve()
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      p.done.then(() => { clearTimeout(timer); resolve() })
+    })
+  }
+
+  // exit 可能先于 stderr 数据到达，稍等输出关闭才能认出资料目录锁错误。
+  function waitOutput(p) {
+    if (!p?.exited || p.outputClosed || !p.child.stderr) return Promise.resolve()
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, stderrWaitMs)
+      p.outputDone.then(() => { clearTimeout(timer); resolve() })
+    })
+  }
+
+  /** 结束自己启动的浏览器及其子进程；没确认退出前不允许启动下一个。 */
+  async function stopOwned(p) {
+    if (!p) return
+    if (p.stopping) return p.stopping
+    p.needsStop = true
+    p.stopping = Promise.resolve().then(async () => {
+      // 对已确认连上的自己进程先走浏览器的正常退出，避免留下旧锁。
+      if (!p.exited && p.terminate) {
+        try { await p.terminate.send('Browser.close', {}, 3000) } catch (error) {}
+        await waitExit(p, stopWaitMs)
+        p.terminate.close()
+        p.terminate = null
+      }
+      if (!p.exited && p.child.pid) {
+        if (platform === 'win32') {
+          let killed = false
+          try { killed = await killTree(p.child.pid) } catch (error) {}
+          if (!killed && !p.exited) try { p.child.kill('SIGKILL') } catch (error) {}
+        } else {
+          // 正常退出不可用时结束整个自有进程组，避免主进程退出后子进程残留。
+          try { killGroup(p.child.pid, 'SIGKILL') } catch (error) { try { p.child.kill('SIGKILL') } catch (e) {} }
+        }
+        await waitExit(p, stopWaitMs)
+        if (!p.exited) {
+          try { p.child.kill('SIGKILL') } catch (error) {}
+          await waitExit(p, stopWaitMs)
         }
       }
-      return launch()
-    })().catch((error) => ({ ok: false, message: error.message })).finally(() => { opening = null })
+      if (p.terminate) { p.terminate.close(); p.terminate = null }
+      if (!p.exited && p.child.pid) throw new Error('无法确认自己启动的浏览器已退出，请检查该进程')
+      // 自己的窗口确实关了，端口记录也作废，下次别去接它
+      try { rmSync(join(profileDir, 'DevToolsActivePort'), { force: true }) } catch (error) {}
+      if (owned === p) owned = null
+    })
+    try { await p.stopping } finally { p.stopping = null }
+  }
+
+  async function attach(port, check) {
+    const { page, extra } = pickPage(await getBrowserJson(`http://127.0.0.1:${port}/json/list`))
+    check()
+    for (const t of extra) await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`).catch(() => {})
+    let target = page
+    if (!target) target = await getBrowserJson(`http://127.0.0.1:${port}/json/new?about:blank`).catch(() => null)
+    check()
+    if (!target?.webSocketDebuggerUrl) throw new Error('浏览器里没有能控制的标签页')
+    const c = connect(target.webSocketDebuggerUrl)
+    attaching = c
+    try {
+      await c.ready
+      check()
+      await c.send('Page.enable')
+      await c.send('Runtime.enable')
+      await c.send('Network.enable', { maxResourceBufferSize: 20e6, maxTotalBufferSize: 100e6 })
+      await c.send('Page.setMuted', { muted: true }).catch(() => {}) // 老版本没有这个命令，静音再靠 --mute-audio
+      check()
+      cdp = c
+    } catch (error) {
+      c.close()
+      throw error
+    } finally {
+      if (attaching === c) attaching = null
+    }
+  }
+
+  function launchError(error, p) {
+    const detail = [error?.message, p?.error?.message, p?.stderr?.trim()].filter(Boolean).join('；')
+    if (/SingletonLock|profile appears to be in use/i.test(detail)) return lockError()
+    return new Error(detail || '浏览器没起来，请检查浏览器路径和专用资料目录')
+  }
+
+  async function launch(source, check) {
+    let p = owned
+    try {
+      check()
+      if (p?.exited || p?.needsStop) { await stopOwned(p); p = null }
+      if (p) {
+        cdp?.close()
+        cdp = null
+        await attach(p.port, () => { check(); if (p.exited || p.error) throw launchError(null, p) })
+        return
+      }
+      // DSH 被强制重启时上一个窗口还开着：接回去，不然它一直占着资料目录
+      const left = readPortFile(profileDir)
+      if (left && await getBrowserJson(`http://127.0.0.1:${left}/json/version`, 1500).catch(() => null)) {
+        check()
+        p = owned = { child: { pid: 0, kill() {} }, port: left, exited: false, error: null, stderr: '', done: new Promise(() => {}), outputClosed: true, outputDone: Promise.resolve() }
+        await attach(left, check)
+        return
+      }
+      if (hasLock()) throw lockError()
+      const path = browserPath()
+      const bin = findBrowser(path)
+      if (!bin) throw new Error(path ? `浏览器路径不对：${path}` : '找不到 Edge / Chrome，先装一个，或在面板里填浏览器路径')
+      mkdirSync(profileDir, { recursive: true })
+      const port = await getPort()
+      check()
+      // 在分配端口期间也可能有别的浏览器占用资料目录。
+      if (hasLock()) throw lockError()
+      check()
+      log?.info?.(`启动抖音专用浏览器，触发来源：${source}`)
+      const child = spawnProcess(bin, [
+        `--user-data-dir=${profileDir}`,
+        `--remote-debugging-port=${port}`,
+        '--remote-debugging-address=127.0.0.1',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--mute-audio',
+        '--autoplay-policy=no-user-gesture-required',
+        // 窗口在屏幕外也照常播放视频、跑页面脚本（不然会被当成后台窗口限速）
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=Translate,MediaRouter,CalculateNativeWinOcclusion',
+        '--window-size=1280,860',
+        '--window-position=-2400,-2400', // 放到屏幕外，不抢前台；要看的时候 show()
+        'about:blank',
+      ], { stdio: ['ignore', 'ignore', 'pipe'], detached: true })
+      p = owned = observe(child, port)
+      child.unref()
+      for (let i = 0; i < 60; i++) {
+        await wait(250)
+        check()
+        if (p.exited || p.error) throw launchError(null, p)
+        const version = await getBrowserJson(`http://127.0.0.1:${port}/json/version`, 1500).catch(() => null)
+        check()
+        if (p.exited || p.error) throw launchError(null, p)
+        if (version) {
+          // Edge 经常不写这个文件，自己写一份，DSH 重启后才能接回这个窗口
+          try { writeFileSync(join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/aurabot\n`) } catch (error) {}
+          await attach(port, () => { check(); if (p.exited || p.error) throw launchError(null, p) })
+          return
+        }
+      }
+      throw launchError(null, p)
+    } catch (error) {
+      try { await stopOwned(p) } catch (stopError) { throw new Error(`${launchError(error, p).message}；${stopError.message}`) }
+      if (error.code === 'cancelled') throw error
+      await waitOutput(p)
+      throw launchError(error, p)
+    }
+  }
+
+  /** 连上自己启动的浏览器；失败统一退避，手动和定时入口共用。 */
+  async function open(source = '主人要求', canStart = () => true) {
+    if (closing) await closing
+    if (!canStart()) return { ok: false, message: '抖音已关闭，请先打开抖音开关' }
+    if (connected()) return { ok: true }
+    if (opening) return opening
+    if (now() < retryAt) return { ok: false, message: `${lastError}；浏览器将在 ${Math.ceil((retryAt - now()) / 60_000)} 分钟后重试` }
+    const started = generation
+    const check = () => { if (generation !== started || !canStart()) throw cancelled() }
+    // 延后执行，确保同步抛错也能清除 opening，不会把失败结果一直缓存。
+    opening = Promise.resolve().then(async () => {
+      try {
+        await launch(source, check)
+        check()
+        failures = 0
+        retryAt = 0
+        lastError = ''
+        return { ok: true }
+      } catch (error) {
+        if (error.code === 'cancelled' || generation !== started || !canStart()) {
+          if (owned && !owned.exited && cdp && !cdp.closed) owned.terminate ||= cdp
+          else cdp?.close()
+          cdp = null
+          try { await stopOwned(owned) } catch (stopError) { log?.warn?.('关闭抖音浏览器失败：', stopError.message) }
+          return { ok: false, message: error.message }
+        }
+        failures++
+        const delay = Math.min(60, 5 * 2 ** Math.min(failures - 1, 4))
+        retryAt = now() + delay * 60_000
+        lastError = error.message
+        log?.warn?.(`抖音浏览器启动失败：${lastError}；${delay} 分钟后重试`)
+        return { ok: false, message: `${lastError}；浏览器将在 ${delay} 分钟后重试` }
+      }
+    }).finally(() => { opening = null })
     return opening
   }
 
@@ -326,9 +506,24 @@ export function createBrowser({ profileDir, browserPath = () => '', log } = {}) 
     if (visible) await c.send('Page.bringToFront').catch(() => {})
   }
 
-  function close() {
-    cdp?.close()
-    cdp = null
+  async function close() {
+    if (closing) return closing
+    // 先让关闭标记生效，再异步清理，避免同步完成时覆盖 closing。
+    generation++
+    const pending = opening
+    closing = Promise.resolve().then(async () => {
+      attaching?.close()
+      if (owned && !owned.exited && cdp && !cdp.closed) owned.terminate ||= cdp
+      else cdp?.close()
+      cdp = null
+      let failed = null
+      try { await stopOwned(owned) } catch (error) { failed = error }
+      if (pending) await pending
+      if (owned) try { await stopOwned(owned); failed = null } catch (error) { failed = error }
+      else failed = null
+      if (failed) throw failed
+    }).finally(() => { closing = null })
+    return closing
   }
 
   return { open, connected, evaluate, goto, waitFor, click, press, type, clearFocused, pressEnter, waitResponse, screenshot, show, close }

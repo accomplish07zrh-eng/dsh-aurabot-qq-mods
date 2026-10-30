@@ -9,7 +9,7 @@ const { profileToolVisible, profilePermits } = __lib('chat/access.js')
 export default {
   id: 'douyin',
   name: '刷抖音',
-  version: '2.0.0',
+  version: '2.0.1',
   api: 1,
   description: '专用浏览器刷抖音：看推荐、点赞、评论（可在评论里真·@主人），好玩的分享给主人（抖音私信 / QQ）；别人发来链接能点开看（douyin_watch / douyin_like / douyin_comment / douyin_browse）',
   tab: 'douyin',
@@ -19,6 +19,7 @@ export default {
     const setOwner = (owner) => api.setConfig((cur) => ({ ...cur, douyin: { ...cur.douyin, owner } }))
     const dy = createDouyin({ getConfig: api.config, setOwner, hub, memory: api.lazy('memory'), log: api.log })
     api.every(60_000, () => dy.tick(), '刷抖音')
+    api.onDispose(() => dy.dispose())
 
     api.tool(({ chat, sessionId }) => {
       const cfg = api.config()

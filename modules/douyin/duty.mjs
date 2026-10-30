@@ -6,6 +6,7 @@ const __lib = globalThis.aurabot.lib // 插件内部源码（复制出来后靠�
 const { dataDir, readJson, writeJson } = __lib('core/store.js')
 const { isSilence } = __lib('chat/reply.js')
 const { permOf } = __lib('chat/access.js')
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createBrowser } from './browser.mjs'
 import { createSite, findAwemeId, resolveShort, digestOf, videoLink } from './site.mjs'
 
@@ -35,10 +36,13 @@ const emptyState = () => ({
   dmSeen: [], dmInit: false, lastDmCheck: 0, // 主人抖音私信：看过的消息 id；第一次看时旧消息只记下不回
 })
 
-export function createDouyin({ getConfig, setOwner, hub, memory, log, site: injected, now = Date.now, wait } = {}) {
+export function createDouyin({ getConfig, setOwner, hub, memory, log, site: injected, browser: injectedBrowser, now = Date.now, wait } = {}) {
   const cfg = () => getConfig().douyin
   const sleep = wait || ((ms) => new Promise((r) => setTimeout(r, ms)))
-  const site = injected || createSite({ browser: createBrowser({ profileDir: dataDir('douyin', 'edge-profile'), browserPath: () => cfg().browserPath, log }), log })
+  const source = new AsyncLocalStorage()
+  const browser = injectedBrowser || (injected ? null : createBrowser({ profileDir: dataDir('douyin', 'edge-profile'), browserPath: () => cfg().browserPath, log, now }))
+  // 每个调用各自带上来源，并在真正启动前再次检查开关。
+  const site = injected || createSite({ browser: { ...browser, open: () => browser.open(source.getStore() || '主人要求', () => cfg().enabled) }, log })
   const file = () => dataDir('douyin.json')
   const load = () => {
     const raw = readJson(file(), emptyState)
@@ -123,8 +127,8 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
   }
 
   /** 打开浏览器、确认登录了、页面上没验证码。 */
-  async function ready(s) {
-    const r = await site.ensure()
+  async function ready(s, from = '主人要求') {
+    const r = await source.run(from, () => site.ensure())
     if (!r.ok) return r
     const me = await site.self().catch((error) => ({ error: error.message }))
     s.account = { at: now(), loggedIn: Boolean(me?.secUid), nickname: me?.nickname || '', secUid: me?.secUid || '', error: me?.error || '' }
@@ -249,7 +253,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
       // 主人亲口让她去找视频：不受「每天看多少个」的限制（点赞评论分享那些写操作的上限照旧）
       const want = ownerAsked ? Math.max(Math.min(c.perRun, c.maxWatchPerDay - s.watched), Math.min(c.perRun, 3)) : Math.min(c.perRun, c.maxWatchPerDay - s.watched)
       if (want <= 0) return { ok: false, message: `今天已经看了 ${s.watched} 个（上限 ${c.maxWatchPerDay}）` }
-      const r = await ready(s)
+      const r = await ready(s, force ? '主人要求' : '定时')
       if (!r.ok) { s.lastSkipReason = r.message; return r }
       const list = await pick(s, want)
       if (!list.length) { s.lastSkipReason = '这次推荐里没刷到新视频'; return { ok: false, message: s.lastSkipReason } }
@@ -535,7 +539,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
    * 看主人的抖音私信，有新消息就用她的口气回（只认核对过的主人 uid，别人的私信不理）。
    * 主人让她找视频时，她回复里带 [去刷抖音]，回完就去刷一轮，挑中的照样私信分享给主人。
    */
-  async function checkOwnerDms() {
+  async function checkOwnerDms(from = '主人要求') {
     const o = ownerDy()
     if (!o?.uid) return { ok: false, message: '还没核对主人的抖音号' }
     if (busy) return { ok: false, message: '正在刷抖音，等会儿再看私信' }
@@ -546,7 +550,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     let done = () => {}
     try {
       s.lastDmCheck = now()
-      const r = await ready(s)
+      const r = await ready(s, from)
       if (!r.ok) return r
       const list = await site.dms(o.uid)
       // 一条都没读到多半是页面还没加载好：别拿空列表当「看过了」，下次再看
@@ -640,12 +644,17 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
   async function tick() {
     const g = getConfig()
     const c = g.douyin
-    if (!g.enabled || !c.enabled || busy) return
+    if (!c.enabled) {
+      // 即使正在刷或正在启动，也要先关掉本实例启动的浏览器。
+      try { await (browser || site).close?.() } catch (error) { log.warn('关闭抖音浏览器失败：', error.message) }
+      return
+    }
+    if (!g.enabled || busy) return
     const h = new Date(now()).getHours()
     if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
     const s = load()
     if (c.ownerDm && ownerDy() && now() - (s.lastDmCheck || 0) >= c.dmPollMinutes * 60_000) {
-      await checkOwnerDms()
+      await checkOwnerDms('定时')
       return
     }
     if (!c.autoBrowse) return
@@ -660,7 +669,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     const s = load()
     if (!force) return s.account || { loggedIn: false, unknown: true }
     try {
-      const r = await ready(s)
+      const r = await ready(s, '登录')
       return { ...(s.account || { loggedIn: false }), ...(r.ok ? {} : { message: r.message }) }
     } catch (error) {
       return { loggedIn: false, error: error.message }
@@ -673,7 +682,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
   async function loginStep(start) {
     const s = load()
     try {
-      const r = start ? await site.loginStart() : await site.loginPoll()
+      const r = await source.run('登录', () => (start ? site.loginStart() : site.loginPoll()))
       if (!r.ok) return r
       if (r.loggedIn) {
         s.account = { at: now(), loggedIn: true, nickname: r.me.nickname, secUid: r.me.secUid, error: '' }
@@ -692,7 +701,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
 
   /** 把浏览器窗口挪到屏幕里给人看（处理验证码、短信验证）/ 挪回去。 */
   async function showWindow(visible) {
-    const r = await site.ensure()
+    const r = await source.run('主人要求', () => site.ensure())
     if (!r.ok) return r
     await site.show(Boolean(visible))
     return { ok: true, message: visible ? '浏览器窗口挪到屏幕上了，处理完点「收起窗口」' : '窗口收起来了' }
@@ -712,5 +721,11 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     }
   }
 
-  return { run, browse, watch, recentVideos, shareVideo, directDm, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state }
+  // 模块卸载或重载时也要关闭自己启动的浏览器。
+  function dispose() {
+    try { Promise.resolve((browser || site).close?.()).catch((error) => log.warn('关闭抖音浏览器失败：', error.message)) }
+    catch (error) { log.warn('关闭抖音浏览器失败：', error.message) }
+  }
+
+  return { run, browse, watch, recentVideos, shareVideo, directDm, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state, dispose }
 }
