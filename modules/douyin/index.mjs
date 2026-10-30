@@ -9,7 +9,7 @@ const { profileToolVisible, profilePermits } = __lib('chat/access.js')
 export default {
   id: 'douyin',
   name: '刷抖音',
-  version: '2.0.3',
+  version: '2.0.4',
   api: 1,
   description: '用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。',
   tab: 'douyin',

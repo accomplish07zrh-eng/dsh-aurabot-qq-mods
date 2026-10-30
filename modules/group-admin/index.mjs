@@ -6,7 +6,7 @@ const { defineTool, str, int } = __lib('tools/tools.js')
 export default {
   id: 'group-admin',
   name: '群管',
-  version: '1.0.1',
+  version: '1.0.2',
   api: 1,
   description: '主人开口时帮忙管群：禁言、解禁、踢人、改头衔、发公告。她也知道自己在群里有没有管理权限。',
   setup(api) {
