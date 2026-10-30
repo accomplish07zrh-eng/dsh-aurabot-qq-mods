@@ -1,0 +1,12 @@
+{
+  "name": "dsh-aurabot-qq-mods",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.2" },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node scripts/check.mjs",
+    "pack": "node scripts/pack.mjs --out dist"
+  }
+}

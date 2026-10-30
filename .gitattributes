@@ -1,3 +1,8 @@
 # 素材为二进制视频，禁止 diff / 换行转换
 *.webm binary
 *.webm -text -diff
+
+# 模块源码统一 LF，保证任何系统打出来的 zip 哈希一致
+modules/** text=auto eol=lf
+test/fixtures/** text=auto eol=lf
+*.sh text eol=lf
