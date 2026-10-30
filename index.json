@@ -5,7 +5,7 @@
     {
       "id": "douyin",
       "name": "刷抖音",
-      "version": "2.0.3",
+      "version": "2.0.4",
       "description": "用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。",
       "category": "platform",
       "tags": [
@@ -26,18 +26,18 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "douyin-v2.0.3",
-      "file": "douyin-v2.0.3.zip",
-      "path": "douyin-v2.0.3/douyin-v2.0.3.zip",
-      "size": 41163,
-      "sha256": "317300a9d1bd878e0d9770022d1124eb750fd59678fd81e077cb657070e142d2",
-      "commit": "dcb0682eeaa5e9b83d5f03998349b3b2d2c2aedd",
-      "publishedAt": "2026-10-30T18:33:43.259Z"
+      "tag": "douyin-v2.0.4",
+      "file": "douyin-v2.0.4.zip",
+      "path": "douyin-v2.0.4/douyin-v2.0.4.zip",
+      "size": 42472,
+      "sha256": "55370e1e967c1e4e38b8ade27de3cd143118c5e605e21f1ec15b2f3077a0bd7d",
+      "commit": "2498720e6bb617017f603449987e90b9c6eb5633",
+      "publishedAt": "2026-10-30T19:27:42.374Z"
     },
     {
       "id": "group-admin",
       "name": "群管",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "主人开口时帮忙管群：禁言、解禁、踢人、改头衔、发公告。她也知道自己在群里有没有管理权限。",
       "category": "manage",
       "tags": [
@@ -54,13 +54,13 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "group-admin-v1.0.1",
-      "file": "group-admin-v1.0.1.zip",
-      "path": "group-admin-v1.0.1/group-admin-v1.0.1.zip",
-      "size": 3785,
-      "sha256": "a9402295d814583933609bd1195371f2c428dea1ae738333ce7e94642b19768d",
-      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
-      "publishedAt": "2026-10-30T16:25:47.447Z"
+      "tag": "group-admin-v1.0.2",
+      "file": "group-admin-v1.0.2.zip",
+      "path": "group-admin-v1.0.2/group-admin-v1.0.2.zip",
+      "size": 4003,
+      "sha256": "2b66c5826ee257963a9681f4d3c8c46afee6d61425d4255d3f0062030aa14c81",
+      "commit": "2498720e6bb617017f603449987e90b9c6eb5633",
+      "publishedAt": "2026-10-30T19:27:42.374Z"
     },
     {
       "id": "heybox",
@@ -125,8 +125,40 @@
       "sha256": "82ee4e283013974cb3a25972523ad42e1adb554ef1c723bf7262790fc0936e64",
       "commit": "f135814723d21677021f03e2709038059ef8d0a3",
       "publishedAt": "2026-10-30T16:25:47.447Z"
+    },
+    {
+      "id": "tieba-reader",
+      "name": "逛贴吧（只读）",
+      "version": "1.5.0",
+      "description": "只读搜索和浏览贴吧，也可按兴趣向主人私聊分享。",
+      "category": "platform",
+      "tags": [
+        "贴吧",
+        "只读"
+      ],
+      "author": "GitNekopedia",
+      "license": "MIT",
+      "api": 1,
+      "minPluginVersion": "1.2.0",
+      "requires": [],
+      "capabilities": [
+        "network",
+        "filesystem",
+        "process",
+        "dynamic-code",
+        "plugin-config",
+        "plugin-internals"
+      ],
+      "replacesBuiltin": false,
+      "tag": "tieba-reader-v1.5.0",
+      "file": "tieba-reader-v1.5.0.zip",
+      "path": "tieba-reader-v1.5.0/tieba-reader-v1.5.0.zip",
+      "size": 125972,
+      "sha256": "5bae45ed881f062c932186df4342ebc98c5e6d7fc635d917fd5e00b3334dca63",
+      "commit": "2498720e6bb617017f603449987e90b9c6eb5633",
+      "publishedAt": "2026-10-30T19:27:42.374Z"
     }
   ],
   "revoked": [],
-  "generatedAt": "2026-10-30T18:33:43.259Z"
+  "generatedAt": "2026-10-30T19:27:42.374Z"
 }
