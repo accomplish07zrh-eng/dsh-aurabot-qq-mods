@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HeyboxClient } from '../api.mjs'
-import { createHeybox } from '../site.mjs'
+import { HeyboxClient } from '../lib/api.mjs'
+import { createHeybox } from '../lib/site.mjs'
 
 export const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers })
 export const ok = (result = {}) => json({ status: 'ok', result })

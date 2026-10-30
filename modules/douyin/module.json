@@ -1,8 +1,13 @@
 {
   "id": "douyin",
   "name": "刷抖音",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。",
+  "category": "platform",
+  "tags": [
+    "抖音",
+    "短视频"
+  ],
   "author": "Aurabot",
   "license": "MIT",
   "api": 1,

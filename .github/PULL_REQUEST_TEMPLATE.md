@@ -3,6 +3,7 @@
 ## 自查
 
 - [ ] `npm run check` 通过，本地试过这个模块
+- [ ] `category` 选好了，运行过 `npm run catalog`
 - [ ] `capabilities` 如实声明，下面说明了为什么需要
 - [ ] 会访问的域名：
 - [ ] 改已有模块时升了 `version`，入口文件和 `module.json` 一致

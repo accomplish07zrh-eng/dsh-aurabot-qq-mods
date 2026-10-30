@@ -8,5 +8,6 @@
   "api": 1,
   "minPluginVersion": "1.1.24",
   "requires": [],
-  "capabilities": []
+  "capabilities": [],
+  "category": "tool"
 }

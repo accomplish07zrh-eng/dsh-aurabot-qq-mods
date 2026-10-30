@@ -15,9 +15,9 @@ let mergeFromPanel
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-douyin-'))
-  site = await import('../site.mjs')
-  browser = await import('../browser.mjs')
-  duty = await import('../duty.mjs')
+  site = await import('../lib/site.mjs')
+  browser = await import('../lib/browser.mjs')
+  duty = await import('../lib/duty.mjs')
   ;({ normalize, mergeFromPanel } = globalThis.aurabot.lib('core/config.js'))
   ;({ DOUYIN_PERM_KEYS } = globalThis.aurabot.lib('chat/access.js'))
 })

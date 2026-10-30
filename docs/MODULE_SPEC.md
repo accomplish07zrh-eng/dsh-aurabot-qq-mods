@@ -11,8 +11,14 @@ modules/<id>/
 ├── README.md       # 必填：做什么、怎么配置、会访问哪里
 ├── LICENSE         # 必填：这个模块自己的许可证
 ├── panel.js        # 可选：自定义面板
+├── lib/            # 可选：实现文件，入口只放定义和接线
+├── assets/         # 可选：模块自带的数据文件
+├── docs/           # 可选：更长的说明
+├── test/           # 可选：测试，不进发布包
 └── package.json    # 可选：有 npm 依赖、构建或测试时才要
 ```
+
+文件夹不按分类分层：永远是 `modules/<id>/`，分类写在 `module.json` 里。换分类不用搬目录，发布 tag 和安装路径也不变。
 
 文件夹名就是模块 id。`_` 和 `.` 开头的文件夹不发布。测试文件（`*.test.*`、`test/`、`tests/`、`fixtures/`）、`node_modules` 和 `package-lock.json` 不进发布包。
 
@@ -24,6 +30,8 @@ modules/<id>/
   "name": "查天气",
   "version": "1.0.0",
   "description": "一句话说明",
+  "category": "tool",
+  "tags": ["天气"],
   "author": "作者",
   "license": "MIT",
   "api": 1,
@@ -38,7 +46,9 @@ modules/<id>/
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `id` | 是 | 和文件夹名一样；规则同插件：小写字母开头，只有小写字母、数字和 `-`，2~40 个字 |
-| `name`、`description`、`author`、`license` | 是 | 显示在社区模块页 |
+| `name`、`description`、`author`、`license` | 是 | 显示在模块市场 |
+| `category` | 是 | 分类，见下表 |
+| `tags` | 否 | 搜索用的关键词，最多 5 个 |
 | `version` | 是 | `主.次.修`，和入口文件里的 `version` 一样 |
 | `api` | 是 | 按哪一版扩展接口写的，和入口文件里的 `api` 一样 |
 | `minPluginVersion` | 是 | 最低插件版本 |
@@ -49,6 +59,17 @@ modules/<id>/
 | `build` | 有构建时 | 配了就在发布时运行 `npm ci --ignore-scripts` 和 `npm run build`，只打包 `out` 文件夹 |
 
 有 npm 依赖的模块必须用 `build` 打成独立运行包，用户机器上不运行 `npm install`。
+
+## 分类
+
+| 值 | 含义 |
+|---|---|
+| `platform` | 逛平台：抖音、小黑盒这类 |
+| `social` | 聊天互动：群里的玩法、聊天增强 |
+| `creative` | 创作：画图、音乐、写作 |
+| `desktop` | 桌面：桌宠、电脑上的事 |
+| `manage` | 管理：群管、权限 |
+| `tool` | 工具：查东西、提醒 |
 
 ## 能力
 

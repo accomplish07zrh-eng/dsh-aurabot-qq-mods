@@ -4,6 +4,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { catalogFresh } from './catalog.mjs'
 import { BUILTINS, ROOT, checkModule, checkRevoked, compareVersions, listModules, readManifest, tagOf } from './lib.mjs'
 
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
@@ -32,5 +33,6 @@ for (const mod of mods) {
   else console.log(`✓ ${mod.id}`)
 }
 for (const e of checkRevoked(JSON.parse(readFileSync(join(ROOT, 'revoked.json'), 'utf8')))) { console.error(`✗ ${e}`); failed = true }
+if (!catalogFresh()) { console.error('✗ modules/README.md 过期了：运行 npm run catalog'); failed = true }
 console.log(`检查了 ${mods.length} 个模块`)
 process.exit(failed ? 1 : 0)

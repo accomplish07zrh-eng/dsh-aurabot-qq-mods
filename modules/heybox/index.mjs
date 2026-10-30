@@ -4,14 +4,14 @@ const __lib = globalThis.aurabot.lib // 插件内部源码（复制出来后靠�
 // 接口签名、上传与业务逻辑在本模块的 api.mjs / site.mjs。
 // 写操作各有权限（面板「权限」页），默认仅主人；发帖前有自检清单（见面板与规则）。
 
-import { createHeybox } from './site.mjs'
+import { createHeybox } from './lib/site.mjs'
 const { defineTool, str } = __lib('tools/tools.js')
 const { profileToolVisible, profilePermits } = __lib('chat/access.js')
 
 export default {
   id: 'heybox',
   name: '刷小黑盒',
-  version: '1.1.0',
+  version: '1.1.1',
   api: 1,
   description: '用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛和扫码登录。',
   tab: 'heybox',

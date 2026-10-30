@@ -2,10 +2,13 @@
 
 ## 提交步骤
 
+第一次提交模块，跟着 [提交教程](docs/TUTORIAL.md) 走一遍就行。
+
 1. Fork 本仓库，新建 `modules/<id>/`。格式见 [模块规范](docs/MODULE_SPEC.md)。
 2. 本地检查（需要 Node.js 22.2 或更高版本）：
 
    ```sh
+   npm run catalog
    npm run check
    npm run pack
    ```

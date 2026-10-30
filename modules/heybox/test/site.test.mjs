@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fixture, defer, ok } from './helpers.mjs'
-import { isPeakTime, today } from '../site.mjs'
+import { isPeakTime, today } from '../lib/site.mjs'
 
 // 固定东八区，让本地午夜和 UTC 日期不同，能检出 UTC 重置的回归。
 process.env.TZ = 'Asia/Shanghai'
@@ -144,7 +144,7 @@ test('模块重建后未完成的分享继续占额并阻止重发', async (t) =
   const first = f.hb.shareToOwner({ share: '看看', linkId: '123456' })
   assert.equal(f.hb.state().quota.share, 1)
   // 同一个状态文件被重新加载时，待确认记录仍然生效。
-  const { createHeybox } = await import('../site.mjs')
+  const { createHeybox } = await import('../lib/site.mjs')
   const reloaded = createHeybox({ getConfig: () => f.cfg, stateFile: f.stateFile, credFile: 'missing', onebot: { call: async () => { throw new Error('不应发送') } } })
   t.after(() => reloaded.dispose())
   assert.equal((await reloaded.shareToOwner({ share: '看看', linkId: '123456' })).skipped, true)

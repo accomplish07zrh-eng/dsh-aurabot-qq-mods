@@ -2,14 +2,14 @@ const __lib = globalThis.aurabot.lib // 插件内部源码（复制出来后靠�
 // 社区模块（原内置）：刷抖音。专用浏览器里登录一次；定时自己刷推荐、点赞、评论（特别想让主人看的会在评论里真·@主人），看到好玩的分享给主人（抖音私信 / QQ）；
 // 别人发来抖音链接，她也能点开看完再聊。浏览 / 点赞 / 评论 / 分享各有权限（面板「权限」页），默认仅主人。
 
-import { createDouyin } from './duty.mjs'
+import { createDouyin } from './lib/duty.mjs'
 const { defineTool, str } = __lib('tools/tools.js')
 const { profileToolVisible, profilePermits } = __lib('chat/access.js')
 
 export default {
   id: 'douyin',
   name: '刷抖音',
-  version: '2.0.1',
+  version: '2.0.2',
   api: 1,
   description: '用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。',
   tab: 'douyin',

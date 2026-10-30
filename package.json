@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "check": "node scripts/check.mjs",
+    "catalog": "node scripts/catalog.mjs",
     "pack": "node scripts/pack.mjs --out dist"
   }
 }

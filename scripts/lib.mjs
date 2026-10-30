@@ -30,6 +30,19 @@ export const CAPABILITIES = {
   'plugin-internals': { label: '使用插件内部对象', re: /\bapi\.(core|lib|dsh)\b|globalThis\.aurabot/ },
 }
 
+// 分类决定模块在市场和目录里的位置。不够用就在这里加一项，别新建目录层级：
+// 文件夹永远是 modules/<id>/，换分类不用搬目录，发布 tag 和安装路径都不变。
+export const CATEGORIES = {
+  platform: '逛平台',
+  social: '聊天互动',
+  creative: '创作',
+  desktop: '桌面',
+  manage: '管理',
+  tool: '工具',
+}
+const ROOT_FILES = /^(module\.json|index\.m?js|panel\.js|package(-lock)?\.json|.*\.md|LICENSE.*)$/i
+const ROOT_DIRS = new Set(['lib', 'test', 'assets', 'docs'])
+
 export const compareVersions = (a, b) => {
   const x = String(a).split('.').map(Number)
   const y = String(b).split('.').map(Number)
@@ -59,6 +72,8 @@ export function validateManifest(m, id, known = new Set(BUILTINS)) {
   for (const key of ['name', 'description', 'author', 'license']) text(key)
   if (!ID_RE.test(String(m.id || ''))) errors.push(`id「${m.id ?? ''}」不对：小写字母开头，只能有小写字母、数字和 -，2~40 个字`)
   if (m.id !== id) errors.push(`id「${m.id ?? ''}」要和文件夹名「${id}」一样`)
+  if (!CATEGORIES[m.category]) errors.push(`category 要从这些里选：${Object.keys(CATEGORIES).join('、')}`)
+  if (m.tags !== undefined && !(Array.isArray(m.tags) && m.tags.length <= 5 && m.tags.every((t) => typeof t === 'string' && t.trim()))) errors.push('tags 要是字符串数组，最多 5 个')
   if (!VERSION_RE.test(String(m.version || ''))) errors.push('version 要写成 1.2.3')
   if (!Number.isInteger(m.api) || m.api < 1) errors.push('api 要写按哪一版扩展接口开发的（整数）')
   if (!VERSION_RE.test(String(m.minPluginVersion || ''))) errors.push('minPluginVersion 要写成 1.2.3')
@@ -98,6 +113,10 @@ export function checkModule(mod, known) {
   errors.push(...validateManifest(m, mod.id, known))
   for (const name of ['README.md', 'LICENSE']) if (!existsSync(join(mod.dir, name))) errors.push(`缺 ${name}`)
   if (!entryOf(mod.dir)) errors.push('缺入口文件 index.mjs 或 index.js')
+  for (const e of readdirSync(mod.dir, { withFileTypes: true })) {
+    if (e.isFile() && !ROOT_FILES.test(e.name)) warnings.push(`${e.name} 建议放进 lib/ 或 assets/，模块根目录只留入口和说明`)
+    if (e.isDirectory() && !ROOT_DIRS.has(e.name) && !/^[._]/.test(e.name) && e.name !== 'node_modules' && e.name !== 'pet-client') warnings.push(`文件夹 ${e.name}/ 建议归到 lib/、assets/、docs/ 或 test/`)
+  }
   const pkg = existsSync(join(mod.dir, 'package.json')) ? JSON.parse(readFileSync(join(mod.dir, 'package.json'), 'utf8')) : null
   if (Object.keys(pkg?.dependencies || {}).length && !m.build) errors.push('有 npm 依赖的模块必须配 build 打成独立运行包：用户机器上不跑 npm install')
   if (m.build && !pkg?.scripts?.build) errors.push('配了 build，package.json 里要有 scripts.build')
@@ -205,8 +224,8 @@ export function packModule(mod, outDir) {
   const file = `${tag}.zip`
   mkdirSync(outDir, { recursive: true })
   writeFileSync(join(outDir, file), zip)
-  const { id, name, version, description, author, license, api, minPluginVersion, requires, capabilities } = m
-  return { id, name, version, description, author, license, api, minPluginVersion, requires, capabilities, replacesBuiltin: Boolean(m.replacesBuiltin), ...(m.homepage ? { homepage: m.homepage } : {}), tag, file, path: `${tag}/${file}`, size: zip.length, sha256: createHash('sha256').update(zip).digest('hex') }
+  const { id, name, version, description, category, author, license, api, minPluginVersion, requires, capabilities } = m
+  return { id, name, version, description, category, tags: m.tags || [], author, license, api, minPluginVersion, requires, capabilities, replacesBuiltin: Boolean(m.replacesBuiltin), ...(m.homepage ? { homepage: m.homepage } : {}), tag, file, path: `${tag}/${file}`, size: zip.length, sha256: createHash('sha256').update(zip).digest('hex') }
 }
 
 /** 按这次打包结果和现有模块生成新的索引。删掉目录的模块自动下架；内容没变就原样返回。 */

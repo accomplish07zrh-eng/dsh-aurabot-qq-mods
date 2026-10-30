@@ -125,3 +125,16 @@ test('撤回清单校验、版本比较、目录过滤', () => {
   assert.equal(compareVersions('1.0.0', '1.0.0'), 0)
   assert.deepEqual(listModules(join(FIXTURE, 'nope')), [])
 })
+
+test('分类必填且要在清单里；目录按分类排列', async () => {
+  const { validateManifest } = await import('../scripts/lib.mjs')
+  const { renderCatalog } = await import('../scripts/catalog.mjs')
+  const m = { id: 'demo', name: '演示', version: '1.0.0', description: '说明', author: '作者', license: 'MIT', api: 1, minPluginVersion: '1.2.0', requires: [], capabilities: [] }
+  assert.ok(validateManifest(m, 'demo', new Set()).some((e) => e.includes('category')))
+  assert.ok(validateManifest({ ...m, category: 'nope' }, 'demo', new Set()).some((e) => e.includes('category')))
+  assert.deepEqual(validateManifest({ ...m, category: 'tool', tags: ['天气'] }, 'demo', new Set()), [])
+  assert.ok(validateManifest({ ...m, category: 'tool', tags: 'x' }, 'demo', new Set()).some((e) => e.includes('tags')))
+  const text = renderCatalog([{ ...m, category: 'tool' }, { ...m, id: 'a', name: '甲', category: 'platform' }])
+  assert.ok(text.indexOf('## 逛平台') < text.indexOf('## 工具'))
+  assert.ok(!text.includes('## 桌面'))
+})
