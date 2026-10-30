@@ -5,7 +5,7 @@
     {
       "id": "douyin",
       "name": "刷抖音",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "description": "用专用浏览器刷抖音：看推荐、点赞评论，把好玩的视频分享给主人，也能看别人发来的抖音链接。",
       "category": "platform",
       "tags": [
@@ -26,13 +26,13 @@
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "douyin-v2.0.2",
-      "file": "douyin-v2.0.2.zip",
-      "path": "douyin-v2.0.2/douyin-v2.0.2.zip",
-      "size": 39630,
-      "sha256": "abf46f2dafce75f65fe9b93763ecd66568de909c34b6f7c6f4f424c2fe625aa1",
-      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
-      "publishedAt": "2026-10-30T16:25:47.447Z"
+      "tag": "douyin-v2.0.3",
+      "file": "douyin-v2.0.3.zip",
+      "path": "douyin-v2.0.3/douyin-v2.0.3.zip",
+      "size": 41163,
+      "sha256": "317300a9d1bd878e0d9770022d1124eb750fd59678fd81e077cb657070e142d2",
+      "commit": "dcb0682eeaa5e9b83d5f03998349b3b2d2c2aedd",
+      "publishedAt": "2026-10-30T18:33:43.259Z"
     },
     {
       "id": "group-admin",
@@ -65,8 +65,8 @@
     {
       "id": "heybox",
       "name": "刷小黑盒",
-      "version": "1.1.1",
-      "description": "用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛和扫码登录。",
+      "version": "1.1.2",
+      "description": "用主人的账号逛小黑盒：看帖子和热评，点赞、评论、发帖。支持谷时逛、扫码登录和浏览器验证。",
       "category": "platform",
       "tags": [
         "小黑盒",
@@ -80,18 +80,19 @@
       "capabilities": [
         "network",
         "filesystem",
+        "process",
         "plugin-config",
         "plugin-internals"
       ],
       "replacesBuiltin": false,
       "homepage": "https://github.com/accomplish07zrh-eng/dsh-aurabot-qq",
-      "tag": "heybox-v1.1.1",
-      "file": "heybox-v1.1.1.zip",
-      "path": "heybox-v1.1.1/heybox-v1.1.1.zip",
-      "size": 36181,
-      "sha256": "2f595c112b8b9874c72d0b54306594345040e2014d32c25d694e0dc813f7e007",
-      "commit": "f135814723d21677021f03e2709038059ef8d0a3",
-      "publishedAt": "2026-10-30T16:25:47.447Z"
+      "tag": "heybox-v1.1.2",
+      "file": "heybox-v1.1.2.zip",
+      "path": "heybox-v1.1.2/heybox-v1.1.2.zip",
+      "size": 44856,
+      "sha256": "14a39a314e6da95c6d26fc7821be47fd6a1836e8ab39aa0fe444976c39137d5d",
+      "commit": "dcb0682eeaa5e9b83d5f03998349b3b2d2c2aedd",
+      "publishedAt": "2026-10-30T18:33:43.259Z"
     },
     {
       "id": "pet",
@@ -127,5 +128,5 @@
     }
   ],
   "revoked": [],
-  "generatedAt": "2026-10-30T16:25:47.447Z"
+  "generatedAt": "2026-10-30T18:33:43.259Z"
 }
