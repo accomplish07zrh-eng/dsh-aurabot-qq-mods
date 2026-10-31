@@ -132,6 +132,10 @@ let lastWorkKey = ''
 // 布局（舞台/气泡/字体）随 zoom 一起缩，物理身体盒由 bodyBox 按窗口宽反推，天然对上。
 const BASE_W = 280, BASE_H = 430 // createWindow 的原始窗口尺寸（缩放的基准）
 let curScale = 1
+// 松手后落地开关（服务端 /config 的 releaseLand）：开 = 按甩出速度抛出去并落回地面（原行为）；
+// 关 = 拖到哪松手就停在哪（不抛也不落，连「温柔放下」的原地掉落也一并停掉）。
+// 拦截点放主进程 pet:throw 一处：渲染页的甩抛（pet:throw）和原地掉落（throwWith(0,0)）都走这条通道。
+let releaseLand = true
 function applyScale(s) {
   if (!win || win.isDestroyed()) return
   const v = Math.min(2, Math.max(0.5, Number(s) || 1))
@@ -152,6 +156,7 @@ async function refreshConfig() {
       pack = cfg.pack || null
       focusOn = cfg.focus === true
       applyScale(cfg.scale)
+      releaseLand = cfg.releaseLand !== false
       // 行为层配置：总开关 + 鼠标闲置分钟数，本地缓存，读不到用默认
       const b = cfg.behavior || {}
       behaviorCfg = {
@@ -1532,6 +1537,7 @@ setInterval(() => {
 }, 400)
 
 // ---------- IPC（渲染页拖拽/甩抛 → 主进程） ----------
+let lastMove = null // 上次 pet:move 实际落位（去重用）
 ipcMain.on('pet:move', (_e, { x, y }) => {
   stopThrow()
   if (!win || !Number.isFinite(x) || !Number.isFinite(y)) return
@@ -1540,9 +1546,16 @@ ipcMain.on('pet:move', (_e, { x, y }) => {
   // 夹进虚拟桌面：窗口整体留在屏幕可及范围里（松手后甩抛/落地再把身体精确夹回工作区）
   const nx = Math.round(Math.min(Math.max(x, d.x), d.x + d.w - w))
   const ny = Math.round(Math.min(Math.max(y, d.y), d.y + d.h - h))
+  // 丢弃重复坐标：渲染页已按帧合并，但同一位置仍可能连发（对齐后指针抖动等）——重复就不必再动窗口
+  if (lastMove && lastMove.x === nx && lastMove.y === ny) return
+  lastMove = { x: nx, y: ny }
   win.setPosition(nx, ny)
 })
-ipcMain.on('pet:throw', (_e, { vx, vy }) => startThrow(Number(vx) || 0, Number(vy) || 0))
+ipcMain.on('pet:throw', (_e, { vx, vy }) => {
+  // 「松手落地」关掉：松手停在哪就在哪 —— 甩抛与原地掉落（vx=vy=0）一并拦下
+  if (!releaseLand) return
+  startThrow(Number(vx) || 0, Number(vy) || 0)
+})
 ipcMain.on('pet:throw-stop', () => stopThrow())
 // 反应层①点击桌宠：渲染页单击（位移 <6px）上报 → 撒娇动画（渲染页 click 池已播）+ 追鼠标（带冷却）
 ipcMain.on('pet:click', () => { react('click', () => handleBehavior({ action: 'chase_cursor' }), { note: '主人点了桌宠' }) })

@@ -350,6 +350,17 @@ test('人物大小：/config 与 /status 都带 scale；坏值回落 1，越界�
   assert.equal((await startModule({}).call('/config')).json.scale, 1, '没配 = 默认 1')
 })
 
+test('松手落地开关：/config 与 /status 都带 releaseLand；缺省当开（保持原物理行为）', async () => {
+  // 默认开：客户端松手后照旧按甩出速度抛出去落地
+  const env = startModule({})
+  assert.equal((await env.call('/config')).json.releaseLand, true, '没配 = 默认开')
+  assert.equal((await env.call('/status')).json.releaseLand, true, '/status 带给面板')
+  assert.equal(env.exports.status().releaseLand, true, '模块对外 status()（面板走这条）也带 releaseLand')
+  // 显式关：下发 false，客户端松手就停在原地（不抛也不落）；坏值一律当开（别让配置坏了把抛掷弄丢）
+  assert.equal((await startModule({ settings: { petReleaseLand: false } }).call('/config')).json.releaseLand, false, '关掉后 /config 下发 false')
+  assert.equal((await startModule({ settings: { petReleaseLand: 'abc' } }).call('/config')).json.releaseLand, true, '坏值回落开')
+})
+
 // ---------- 默认素材包自动下载（「大肥鱼」素材不进插件 git，装完从素材仓库自动落位） ----------
 
 test('素材包自动下载：缺包 + 配了地址 + fetchZip 注入 → 落位 packs/default-animation/；archive zip 的单层顶层目录 + 素材文件夹自动剥', async () => {
