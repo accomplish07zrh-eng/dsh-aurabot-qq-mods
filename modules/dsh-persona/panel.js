@@ -1,9 +1,8 @@
 // panel.js —— DSH 人设与风格 面板（独立标签页）
-// 拿到 React、h（React.createElement）、ui（面板自带组件）、call（调本模块接口）。
-// 交互约定：改动先暂存在草稿里，点「确认生效」才写进设置；撤销丢弃草稿；
-// 「启用注入」关闭时模块不注入任何内容（变量返回空串，下一轮即撤销）。
+// 注意：本文件被面板当作「函数体」执行，React / h / ui / call 是**外层闭包变量**，
+// 不是组件 props——组件签名里只接 settings / save / toast，ui 和 call 直接用闭包里的。
 
-return function Panel({ settings, save, toast, ui, h, call }) {
+return function Panel({ settings, save, toast }) {
   const { useState, useEffect } = React
   const { Card, Btn, Switch, Row, Select, Seg } = ui
 
