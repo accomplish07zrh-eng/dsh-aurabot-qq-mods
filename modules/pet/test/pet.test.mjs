@@ -337,6 +337,19 @@ test('P1：没放任何素材时 /config 的 pack 为 null（客户端回静态�
   assert.equal(cfg.json.pack, null)
 })
 
+test('人物大小：/config 与 /status 都带 scale；坏值回落 1，越界钳到 0.5~2', async () => {
+  // 正常值透传（/config 给客户端整窗缩放，/status 给面板显示滑条）
+  const env = startModule({ settings: { petScale: 1.5 } })
+  assert.equal((await env.call('/config')).json.scale, 1.5, '/config 下发 scale 给客户端')
+  assert.equal((await env.call('/status')).json.scale, 1.5, '/status 带给面板')
+  assert.equal(env.exports.status().scale, 1.5, '模块对外 status()（面板走这条）也带 scale')
+  // 越界钳制 + 坏值回落 1（原始大小，别把桌宠缩没）
+  assert.equal((await startModule({ settings: { petScale: 9 } }).call('/config')).json.scale, 2, '超过 2 钳到 2')
+  assert.equal((await startModule({ settings: { petScale: 0.1 } }).call('/config')).json.scale, 0.5, '低于 0.5 钳到 0.5')
+  assert.equal((await startModule({ settings: { petScale: 'abc' } }).call('/config')).json.scale, 1, '坏值回落 1')
+  assert.equal((await startModule({}).call('/config')).json.scale, 1, '没配 = 默认 1')
+})
+
 // ---------- 默认素材包自动下载（「大肥鱼」素材不进插件 git，装完从素材仓库自动落位） ----------
 
 test('素材包自动下载：缺包 + 配了地址 + fetchZip 注入 → 落位 packs/default-animation/；archive zip 的单层顶层目录 + 素材文件夹自动剥', async () => {
