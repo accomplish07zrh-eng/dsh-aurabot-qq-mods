@@ -35,6 +35,37 @@
       "publishedAt": "2026-10-30T19:27:42.374Z"
     },
     {
+      "id": "dsh-persona",
+      "name": "DSH 人设与风格",
+      "version": "1.0.0",
+      "description": "把一张人格连同思考/回复风格注入 DSH 的所有会话（像 dsh-cosplay），不改变大肥鱼 QQ 聊天用的人格。默认不注入，关掉即撤销。",
+      "category": "manage",
+      "tags": [
+        "dsh",
+        "人设",
+        "思考风格",
+        "回复风格",
+        "角色扮演"
+      ],
+      "author": "RookieApe-tao",
+      "license": "MIT",
+      "api": 1,
+      "minPluginVersion": "1.2.0",
+      "requires": [],
+      "capabilities": [
+        "plugin-config",
+        "plugin-internals"
+      ],
+      "replacesBuiltin": false,
+      "tag": "dsh-persona-v1.0.0",
+      "file": "dsh-persona-v1.0.0.zip",
+      "path": "dsh-persona-v1.0.0/dsh-persona-v1.0.0.zip",
+      "size": 8056,
+      "sha256": "8d969c93d2b39f1586fc457778c2cd2efec26a558a7b35865ff6d90a4f1fc4a7",
+      "commit": "1f09e51452cedb62f8ce4bed81a78ee9afbb884b",
+      "publishedAt": "2026-10-31T08:21:35.150Z"
+    },
+    {
       "id": "group-admin",
       "name": "群管",
       "version": "1.0.2",
@@ -160,5 +191,5 @@
     }
   ],
   "revoked": [],
-  "generatedAt": "2026-10-31T03:36:48.761Z"
+  "generatedAt": "2026-10-31T08:21:35.150Z"
 }
