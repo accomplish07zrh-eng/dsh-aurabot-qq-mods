@@ -228,12 +228,13 @@ pet.dispatch({ text, modality?, purpose?, force?, anim? })
 | `behaviorCloseWindowEnabled` | **false** | 🔴 允许关窗（物理闸） |
 | `behaviorMoodCloseWindowBelow` | 35 | 心情低于此值 AI 才可能选 `close_window` |
 | `behaviorWindowWhitelist` | 空 | 窗口动作白名单（标题关键词，逗号/换行分隔；空=不额外放行） |
+| `petReleaseLand` | true | 松手后落地：开 = 拖动松手后按甩出速度抛出去、落回屏幕底部；关 = 松手停在哪就在哪（不抛也不落）。坏值一律当开 |
 
 ## 5. 面板对接（host.js 经 /panel/pet/* 代理，模块提供以下导出）
 
 | 导出 | 用途 |
 |---|---|
-| `status()` | 同步返回 `{online, lastSeenAt, clients, focus, carrier, modality, bootId, seq, pack, playbackCount, packInfo, portReady, port, electronInstalled, pid}`（面板状态卡）。`packInfo = {url, downloading, hasDefault, defaultAnims, packs}`：面板「素材包」卡用它显示就位状态与下载地址（内建模块的 `settings` 不渲染表单，故走这里 + `/panel/pet/*` 通道） |
+| `status()` | 同步返回 `{online, lastSeenAt, clients, focus, carrier, modality, bootId, seq, pack, playbackCount, packInfo, portReady, port, electronInstalled, pid, scale, releaseLand}`（面板状态卡）。`packInfo = {url, downloading, hasDefault, defaultAnims, packs}`：面板「素材包」卡用它显示就位状态与下载地址（内建模块的 `settings` 不渲染表单，故走这里 + `/panel/pet/*` 通道） |
 | `download()` | 异步：生成客户端到数据目录，返回 `{ok, dir, files, message}`（面板「下载/重装客户端」按钮） |
 | `setFocus(enabled)` | 写 focus.json + 广播事件（面板专注开关） |
 | `setWebPort(port)` | 宿主启动时注入真实 Web 端口（host.js 读 `ctx.webServer.port`，取不到退 `DSH_WEB_URL` env；注入时机 = pet 每次 module/start + boot 完成兜底）。非法端口拒绝返回 false；写 host.json 幂等 |

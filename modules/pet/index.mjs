@@ -34,7 +34,7 @@ const MIN_MS = 60_000            // 一分钟（碎碎念间隔/静默窗口都�
 export default {
   id: 'pet',
   name: '桌宠',
-  version: '1.0.3',
+  version: '1.0.4',
   api: 1,
   description: '把大肥鱼请到桌面上：会冒气泡、做小动作，你在干活时也陪着你。',
 
@@ -74,6 +74,7 @@ export default {
     chatBehaviorCooldownMinutes: 5,    // 两次聊天联动之间的全局冷却（分钟，1~1440）
     chatBehaviorMaxPerDay: 20,         // 聊天联动每日上限
     petScale: 1,                       // 人物大小倍率（0.5~2.0，1 = 原始 240px；客户端按窗口宽等比缩放）
+    petReleaseLand: true,              // 松手后落地：开 = 按甩出速度抛出去并落回屏幕底部（原行为）；关 = 松手停在哪就在哪
   },
   settings: [
     { key: 'carrier', label: '主动搭话载体', type: 'select', options: [{ value: 'qq', label: 'QQ 私聊' }, { value: 'pet', label: '桌宠气泡' }], hint: 'pet 时桌宠不在线会按下面的开关回落到 QQ；两边永不双发' },
@@ -109,6 +110,7 @@ export default {
     { key: 'chatBehaviorCooldownMinutes', label: '聊天联动冷却（分钟）', type: 'number', min: 1, max: 1440 },
     { key: 'chatBehaviorMaxPerDay', label: '聊天联动每日上限', type: 'number', min: 0, max: 9999 },
     { key: 'petScale', label: '人物大小（倍）', type: 'number', min: 0.5, max: 2, hint: '桌宠整体缩放倍率：0.5 = 一半大，2 = 两倍大，1 = 原始大小。面板「桌宠」卡的大小滑条改的也是这一项' },
+    { key: 'petReleaseLand', label: '松手后落地', type: 'switch', hint: '拖动松手后按甩出速度抛出去、落回屏幕底部（带 Q 弹挤压）；关掉则松手停在哪就在哪，不抛也不落' },
   ],
 
 
@@ -260,6 +262,11 @@ export default {
     function petScale() {
       const s = Number(api.settings().petScale)
       return Number.isFinite(s) && s > 0 ? Math.min(2, Math.max(0.5, s)) : 1
+    }
+
+    /** 松手后落地开关：读不到一律当开（保持原物理行为），别让配置坏了把抛掷弄丢。 */
+    function petReleaseLand() {
+      return api.settings().petReleaseLand !== false
     }
 
     // ---------- pet pack（换形象，仿 dsh-pet 目录约定；运行数据只写数据目录） ----------
@@ -2220,7 +2227,7 @@ export default {
       const s = api.settings()
       api.core.http.send(res, 200, {
         ok: true, name: 'aurabot-pet', version: api.version,
-        online: online(), focus: focusOn(), scale: petScale(), bootId, seq,
+        online: online(), focus: focusOn(), scale: petScale(), releaseLand: petReleaseLand(), bootId, seq,
         carrier: s.carrier, modality: s.modality, fallbackToQQ: s.petFallbackToQQ !== false,
         pack: activePack(), playbackCount: playbacks.length,
         work: { ...workSnapshot(), label: WORK_STATE_LABEL[workSnap.state] || '' }, // 当前她在干什么（思考中/干活中/完成…）
@@ -2244,6 +2251,8 @@ export default {
         pack: packView(), // 动画池/权重/事件映射/物理参数 + 干活状态/碎碎念动画映射；null = 没素材，客户端走静态形象
         // 人物大小倍率（0.5~2.0）：客户端按它整窗等比缩放（setZoomFactor + setSize），物理/拖拽共用窗口宽反推
         scale: petScale(),
+        // 松手后落地开关：false = 客户端松手后停在原地（不抛不落）；缺省当 true
+        releaseLand: petReleaseLand(),
         work: { ...workSnapshot(), label: WORK_STATE_LABEL[workSnap.state] || '' },
         whisper: (({ enabled, source }) => ({ enabled, source }))(whisperStatus()),
         // 行为层：客户端的**反应层**（点击/勾引/摸摸/鼠标闲置）是本地直接演的，不看这一份的话
@@ -2511,7 +2520,7 @@ export default {
         const s = api.settings()
         const w = workSettings()
         return {
-          ...online(), focus: focusOn(), scale: petScale(), carrier: s.carrier, modality: s.modality, bootId, seq,
+          ...online(), focus: focusOn(), scale: petScale(), releaseLand: petReleaseLand(), carrier: s.carrier, modality: s.modality, bootId, seq,
           pack: activePack(), playbackCount: playbacks.length,
           // 素材包概况：面板「素材包」卡用它显示状态（内建模块的 settings 不渲染表单，只能走 status + /panel/pet/*）
           packInfo: (() => {
