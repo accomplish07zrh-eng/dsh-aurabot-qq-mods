@@ -98,13 +98,17 @@ export default {
       return dshPersonaText(body, { thinkingStyle: s.thinkingStyle, replyStyle: s.replyStyle })
     }
     // 变量名/段名特意和内核版、dsh-cosplay 错开：同时装了也不互相覆盖（只是会叠加人设，别同时开）
-    api.dsh.systemPrompt.variable('aurabot_ext_dsh_persona', renderNow)
+    // variable()/section() 都返回注销函数：模块停用/重载时必须注销，否则重载时会报「already registered」
+    const offVariable = api.dsh.systemPrompt.variable('aurabot_ext_dsh_persona', renderNow)
     const offSection = api.dsh.systemPrompt.section?.({
       name: 'aurabot-ext-dsh-persona',
       order: 10270, // 内置 persona 后缀段 10200、dsh-cosplay 追加段 10250 之后
       text: '{{aurabot_ext_dsh_persona}}',
     })
-    api.onDispose(() => { try { offSection?.() } catch {} })
+    api.onDispose(() => {
+      try { offSection?.() } catch {}
+      try { offVariable?.() } catch {}
+    })
 
     // 面板数据：当前设置 + 可选人格列表 + 当前正在用的人格 id
     api.route('/state', async () => {
