@@ -40,6 +40,14 @@ function inHours(hour, start, end) {
 }
 
 // 跨午夜时，凌晨归属于前一天开始的峰时段。
+/** 服务端只认 user_pkey，浏览器里复制到的常常只有 pkey：补一条同值的。 */
+export function normalizeCookie(raw) {
+  const s = String(raw || '').trim()
+  if (!s || /(?:^|;\s*)user_pkey=/i.test(s)) return s
+  const key = s.match(/(?:^|;\s*)pkey=([^;\s]+)/i)?.[1]
+  return key ? `${s.replace(/;\s*$/, '')}; user_pkey=${key}` : s
+}
+
 export function isPeakTime(c = {}, at = new Date()) {
   const h = at.getHours() + at.getMinutes() / 60
   const ranges = [[c.peakStartAM ?? 9, c.peakEndAM ?? 12], [c.peakStartPM ?? 14, c.peakEndPM ?? 18]]
@@ -102,10 +110,10 @@ export function createHeybox({ getConfig, setCookie, hub, memory, log, stateFile
   /** Cookie 从配置或凭据文件读；配置优先（面板里填的） */
   function cookie() {
     const c = (getConfig().heybox || {}).cookie || ''
-    if (c) return String(c).trim()
+    if (c) return normalizeCookie(c)
     try {
       const j = JSON.parse(fs.readFileSync(credFile, 'utf8'))
-      return Object.entries(j.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ')
+      return normalizeCookie(Object.entries(j.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; '))
     } catch { return '' }
   }
 
@@ -712,7 +720,7 @@ export function createHeybox({ getConfig, setCookie, hub, memory, log, stateFile
   }
 
   function saveCookie(raw) {
-    const s = String(raw || '').trim()
+    const s = normalizeCookie(raw)
     if (!s) return { ok: false, message: 'Cookie 是空的' }
     if (!/(?:^|;\s*)(?:user_)?pkey=[^;\s]+/.test(s)) return { ok: false, message: '这串 Cookie 里没有 pkey，多半没复制全' }
     const st = readState()
@@ -851,17 +859,18 @@ export function createHeybox({ getConfig, setCookie, hub, memory, log, stateFile
       if (!r.ok) return r
       if (!/(?:^|;\s*)(?:user_)?pkey=[^;\s]+/.test(String(r.cookie || ''))) return { ok: false, verified: false, message: '浏览器里没有登录 Cookie' }
       if (!unchanged()) return { ok: false, verified: false, message: '账号或风控状态已改变，请重新开始' }
-      const check = await verifyCookie(c, r.cookie, session.riskToken)
+      const candidate = normalizeCookie(r.cookie)
+      const check = await verifyCookie(c, candidate, session.riskToken)
       if (!check.verified || !unchanged()) return { ok: false, verified: false, message: '账号尚未确认可用，Cookie 和冷却保持不变' }
       // 账号检查可能耗时，保存前再看一次页面和 Cookie，防止期间出现新验证或换号。
       const latest = await getVerifier().finish()
       if (!latest.ok) return latest
       if (!unchanged() || latest.cookie !== r.cookie) return { ok: false, verified: false, message: '账号或风控状态已改变，请重新开始' }
       if (typeof setCookie !== 'function') return { ok: false, verified: false, message: '配置保存接口不可用' }
-      await setCookie(r.cookie)
+      await setCookie(candidate)
       if (disposed || verifySession !== session) return { ok: false, verified: false, message: '验证已结束' }
-      if (session.riskToken !== c.riskToken() || cookie() !== r.cookie) return { ok: false, verified: false, message: '账号或风控状态已改变，冷却保持不变' }
-      saveCookie(r.cookie)
+      if (session.riskToken !== c.riskToken() || cookie() !== candidate) return { ok: false, verified: false, message: '账号或风控状态已改变，冷却保持不变' }
+      saveCookie(candidate)
       c.clearRisk()
       verifySession = null
       return { ok: true, verified: true, nickname: check.nickname, heyboxId: check.heyboxId, count: r.count, shot: r.shot, message: '浏览器账号验证成功，Cookie 已保存' }

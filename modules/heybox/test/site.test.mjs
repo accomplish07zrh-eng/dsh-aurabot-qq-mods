@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fixture, defer, ok } from './helpers.mjs'
-import { isPeakTime, today } from '../lib/site.mjs'
+import { isPeakTime, normalizeCookie, today } from '../lib/site.mjs'
+import { AUTH_STATUS } from '../lib/api.mjs'
 
 // 固定东八区，让本地午夜和 UTC 日期不同，能检出 UTC 重置的回归。
 process.env.TZ = 'Asia/Shanghai'
@@ -193,3 +194,14 @@ test('自动分享仅允许模型选择本轮信息流的帖子并检查 dryRun'
   assert.equal((await f.hb.shareToOwner({ share: '看看', linkId: '234567' })).skipped, true)
   assert.equal(f.sends.length, 1)
 })
+
+test('Cookie 只有 pkey 时补同值的 user_pkey，login 状态算登录失效（#164）', () => {
+  assert.equal(normalizeCookie('pkey=a; heybox_id=1'), 'pkey=a; heybox_id=1; user_pkey=a')
+  assert.equal(normalizeCookie('pkey=a;'), 'pkey=a; user_pkey=a')
+  assert.equal(normalizeCookie('pkey=a; user_pkey=b'), 'pkey=a; user_pkey=b')
+  assert.equal(normalizeCookie('user_pkey=b'), 'user_pkey=b')
+  assert.equal(normalizeCookie('heybox_id=1'), 'heybox_id=1')
+  assert.equal(normalizeCookie(''), '')
+  assert.ok(AUTH_STATUS.has('login'))
+})
+

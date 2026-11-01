@@ -65,7 +65,7 @@ test('通过页面探测和账号检查后才保存 Cookie 并解除冷却，接
   let mode = 'empty'
   const f = fixture({ verifier, initialState: cooling, fetcher: async (url, options) => {
     assert.equal(url.pathname, '/account/restore_login')
-    assert.equal(options.headers.cookie, 'pkey=new')
+    assert.equal(options.headers.cookie, 'pkey=new; user_pkey=new')
     if (mode === 'empty') return ok({})
     if (mode === 'error') throw new Error('网络出错')
     return ok({ profile: { heybox_id: '42', username: '盒友' } })
@@ -89,7 +89,7 @@ test('通过页面探测和账号检查后才保存 Cookie 并解除冷却，接
   assert.equal(result.verified, true)
   assert.equal(result.cookie, undefined)
   assert.equal(result.heyboxId, '42')
-  assert.equal(f.cfg.heybox.cookie, 'pkey=new')
+  assert.equal(f.cfg.heybox.cookie, 'pkey=new; user_pkey=new')
   assert.equal(f.hb.risk().level, 0)
   assert.equal((await f.hb.verifyFinish()).ok, false)
 })

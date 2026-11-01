@@ -125,7 +125,7 @@ export class HeyboxError extends Error {
   }
 }
 
-const AUTH_STATUS = new Set(['relogin', 'not_login', 'need_login', 'login_required', 'need_google_check'])
+export const AUTH_STATUS = new Set(['login', 'relogin', 'not_login', 'need_login', 'login_required', 'need_google_check'])
 const CAPTCHA_STATUS = new Set(['show_captcha', 'need_captcha', 'need_verify', 'verify_required'])
 const TIERS = [
   { name: 'qr', re: /^\/account\/(get_qrcode_url|qr_state)\/?$/, gap: 3000 },
@@ -292,7 +292,7 @@ export class HeyboxClient {
       if (!data) throw new HeyboxError(`响应不是 JSON（HTTP ${res.status}）`, 'protocol')
       const setCookies = typeof res.headers?.getSetCookie === 'function' ? res.headers.getSetCookie() : []
       if (data.status === 'ok') return captureCookies ? { data, setCookies } : data
-      if (AUTH_STATUS.has(data.status)) throw new HeyboxError(`登录态失效（${data.status}）：请重新登录`, 'auth')
+      if (AUTH_STATUS.has(data.status)) throw new HeyboxError(`登录态失效（${data.status}）：${data.msg || '请重新登录'}`, 'auth')
       throw new HeyboxError(`小黑盒拒绝（${data.status ?? 'no-status'}）：${data.msg ?? ''}`.trim(), 'api', { payload: data })
     })
   }
