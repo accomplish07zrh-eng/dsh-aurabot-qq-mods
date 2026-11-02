@@ -1643,6 +1643,85 @@ test('安全：显式配置 publicBaseUrl 时，已鉴权的伪造 X-Forwarded �
   assert.equal(env.exports.status().publicBaseUrl, 'https://bot.example.com', 'status 仍报显式配置的地址')
 })
 
+test('安全：明文 http 的跨机访问默认阻断；显式 allowInsecureRemote 才放行', async () => {
+  // 默认：配了 http:// 的对外地址 + 非回环 Host + 合法 token → 必须在 Host 闸之后被明文闸挡住
+  const env = startModule({ settings: { publicBaseUrl: 'http://bot.example.com' } })
+  const st = await env.call('/status', { headers: { host: '127.0.0.1:53210' } })
+  assert.equal(st.status, 200, '回环请求照常放行')
+  assert.equal(st.json.publicBaseInsecure, true, 'status 报明文风险，面板据此提示')
+  assert.equal(st.json.allowInsecureRemote, false, '默认不允许明文跨机')
+  const r = await env.call('/status', { headers: { host: 'bot.example.com' } })
+  assert.equal(r.status, 403, '明文 http 跨机默认拒绝')
+  assert.ok(/明文|https/i.test(String(r.json?.message || '')), '错误信息要说清楚要用 https')
+  // 显式放行后能过（只建议内网自测）
+  const env2 = startModule({ settings: { publicBaseUrl: 'http://bot.example.com', allowInsecureRemote: true } })
+  const r2 = await env2.call('/status', { headers: { host: 'bot.example.com' } })
+  assert.equal(r2.status, 200, 'allowInsecureRemote 打开后放行')
+})
+
+test('安全：令牌轮换后旧令牌立即失效，新令牌可用', async () => {
+  const env = startModule({ settings: { publicBaseUrl: 'https://bot.example.com' } })
+  const oldToken = env.token
+  const hostFile = env.api.dataDir('host.json')
+  // 旧令牌可用
+  const ok1 = await env.call('/status', { headers: { host: 'bot.example.com' } })
+  assert.equal(ok1.status, 200, '轮换前旧令牌可用')
+  // 轮换
+  const rot = env.exports.rotateToken()
+  assert.equal(rot.ok, true, '轮换成功')
+  const newToken = JSON.parse(readFileSync(hostFile, 'utf8')).token
+  assert.notEqual(newToken, oldToken, 'host.json 里已是新令牌')
+  // 旧令牌立即失效
+  const bad = await env.call('/status', { headers: { host: 'bot.example.com', 'x-pet-token': oldToken } })
+  assert.equal(bad.status, 401, '旧令牌立即失效（这是令牌泄露时的应急手段）')
+  // 新令牌可用
+  const ok2 = await env.call('/status', { headers: { host: 'bot.example.com', 'x-pet-token': newToken } })
+  assert.equal(ok2.status, 200, '新令牌可用')
+})
+test('安全：令牌连续失败触发按 IP 限速封禁（公网防暴力猜）', async () => {
+  const env = startModule({ settings: { publicBaseUrl: 'https://bot.example.com' } })
+  // 阈值 20 次：前 20 次 401，第 21 次起该 IP 被封禁（429），不再继续比对令牌
+  const ip = '203.0.113.9'
+  const send = (headers) => env.call('/status', { headers: { host: 'bot.example.com', ...headers } })
+  let first429At = 0
+  for (let i = 1; i <= 25; i++) {
+    const r = await send({ 'x-pet-token': 'f'.repeat(48), 'x-forwarded-for': ip })
+    if (r.status === 429) { first429At = i; break }
+    assert.equal(r.status, 401, `第 ${i} 次错误令牌应仍是 401`)
+  }
+  assert.equal(first429At, 21, '第 21 次起触发封禁（阈值 20 次失败）')
+  // 封禁期间即使令牌正确也拒绝（封禁先于比对）
+  const blocked = await send({ 'x-pet-token': env.token, 'x-forwarded-for': ip })
+  assert.equal(blocked.status, 429, '封禁期间该 IP 一律拒绝')
+  // 换一个来源 IP 不受影响（限速按 IP 隔离，不能误伤别人）
+  const other = await send({ 'x-pet-token': env.token, 'x-forwarded-for': '198.51.100.7' })
+  assert.equal(other.status, 200, '其它 IP 不受影响')
+})
+
+test('安全：客户端包只含客户端源码，不含 node_modules（消除 161MB 体积膨胀）', async () => {
+  const env = startModule({ settings: { publicBaseUrl: 'https://bot.example.com' } })
+  // 在 app/ 里造一个大文件（模拟 electronInstall 装进 node_modules 的 electron.exe）
+  const appDir = env.api.dataDir('app')
+  mkdirSync(join(appDir, 'node_modules', 'electron', 'dist'), { recursive: true })
+  writeFileSync(join(appDir, 'node_modules', 'electron', 'dist', 'electron.exe'), Buffer.alloc(2 * 1024 * 1024))
+  const r = env.exports.clientPackage()
+  assert.equal(r.ok, true, '打包成功')
+  // 从 central directory 读条目名（只看名字，不解压内容）
+  const zip = r.buffer
+  const count = zip.readUInt16LE(zip.length - 22 + 10)
+  let ptr = zip.readUInt32LE(zip.length - 22 + 16)
+  const names = []
+  for (let i = 0; i < count; i++) {
+    const nameLen = zip.readUInt16LE(ptr + 28)
+    names.push(zip.toString('utf8', ptr + 46, ptr + 46 + nameLen))
+    ptr += 46 + nameLen + zip.readUInt16LE(ptr + 30) + zip.readUInt16LE(ptr + 32)
+  }
+  assert.ok(names.includes('main.js'), '必须含 main.js')
+  assert.ok(names.includes('host.json'), '必须含内嵌 host.json')
+  assert.equal(names.some((n) => n.includes('node_modules')), false, '不得把 node_modules（electron.exe 等）打进包')
+  assert.ok(zip.length < 1024 * 1024, `包体积应远小于 1MB（实际 ${zip.length} 字节）`)
+})
+
 test('同机零退化：未配置 publicBaseUrl 时 host.json / guard 与旧行为一致', async () => {
   const env = startModule()
   const hostFile = env.api.dataDir('host.json')

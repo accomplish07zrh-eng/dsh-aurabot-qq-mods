@@ -89,6 +89,9 @@ export default {
     // 对外公网地址（远端直连，2026-11-02 起）：填了 http(s) 完整地址（如 https://bot.example.com），
     // host.json 的 baseUrl 就写它，桌宠客户端可在用户自己电脑直连服务器插件。留空 = 全部行为与旧版一致（同机零退化）
     publicBaseUrl: '',
+    // 安全项（2026-11-02）：明文 http 跨机默认阻断；令牌过期天数（0 = 不过期，老用户零退化）
+    allowInsecureRemote: false,
+    tokenTtlDays: 0,
   },
   settings: [
     { key: 'carrier', label: '主动搭话载体', type: 'select', options: [{ value: 'qq', label: 'QQ 私聊' }, { value: 'pet', label: '桌宠气泡' }], hint: 'pet 时桌宠不在线会按下面的开关回落到 QQ；两边永不双发' },
@@ -135,7 +138,9 @@ export default {
     // 天气（一期）：进 prompt 的「现在」段，她聊到出门/穿衣/下雨时接得上
     { key: 'petWeatherCity', label: '天气城市', type: 'text', hint: '填城市名（如 上海）才接入天气；留空 = 不接入，所有天气逻辑静默跳过。填了之后插件会向天气接口（默认 wttr.in，可在下方替换地址）请求这个城市的天气，结果只进 prompt 和本地缓存，不会发给聊天对象；天气接口本身会看到城市名' },
     { key: 'petWeatherUrl', label: '天气接口地址', type: 'text', hint: '高级：接口模板，{city} 会被替换成编码后的城市名，返回纯文本即可（如 https://wttr.in/{city}?format=%C+%t）。留空 = 用内置默认（wttr.in，免 key）；请求失败保留上一次缓存、不打扰' },
-    { key: 'publicBaseUrl', label: '对外公网地址（远端直连）', type: 'text', hint: '服务器部署（无桌面）时填插件对外地址，如 https://bot.example.com（带 https:// 前缀，末尾斜杠可省）。填了之后：host.json 的 baseUrl 写它，桌宠客户端可在你自己的电脑上直连服务器；面板「桌宠」页会出现「下载客户端包」按钮，服务器上的 Electron 安装/启动按钮自动隐藏。留空 = 同机模式，一切照旧。跨机必须走 https（客户端会收到明文 http 警告）；安全只靠 x-pet-token 一道闸，别把令牌外泄' },
+    { key: 'publicBaseUrl', label: '对外公网地址（远端直连）', type: 'text', hint: '服务器部署（无桌面）时填插件对外地址，如 https://bot.example.com（带 https:// 前缀，末尾斜杠可省）。填了之后：host.json 的 baseUrl 写它，桌宠客户端可在你自己的电脑上直连服务器；面板「桌宠」页会出现「下载客户端包」按钮，服务器上的 Electron 安装/启动按钮自动隐藏。留空 = 同机模式，一切照旧。⚠ 跨机必须 https：明文 http 会被直接阻断（令牌与气泡在公网明文传输等于送人）' },
+    { key: 'allowInsecureRemote', label: '允许明文 http 跨机（不推荐）', type: 'switch', hint: '⚠ 仅内网自测：打开后允许 http:// 的非回环地址跨机连接，令牌与气泡内容明文传输，公网上等于把令牌送人。正常部署请用 https 反向代理，别开这个' },
+    { key: 'tokenTtlDays', label: '桌宠令牌有效期（天）', type: 'number', min: 0, max: 3650, hint: '0 = 永不过期（默认，老用户零影响）。设了天数后令牌到期即要求重新下发；到期后在面板点「轮换令牌」并重新下载客户端包' },
   ],
 
 
@@ -159,24 +164,104 @@ export default {
     }
 
     // ---------- 令牌（host-token：32~80 位 hex，已生成过就直接复用） ----------
+    // 【安全】令牌是长期 bearer，跨机部署时它就是唯一防线（Host/Origin 闸只防浏览器跨站，
+    // 不防直接发请求的脚本）。因此补三件事：
+    //   ① 轮换（rotateToken）：一键换新，旧的立即失效，客户端需重新下载包；
+    //   ② 过期（tokenTtlDays，默认 0 = 不过期，老用户零退化）；
+    //   ③ 签发时间落盘（host-token.json），供过期判定与界面展示。
     let tokenCache = ''
+    let tokenIssuedAt = 0 // 签发时间（ms）；0 = 老令牌文件没有记录，按「不过期」处理
+    const tokenMetaFile = () => api.dataDir('host-token.json')
     function token() {
       if (tokenCache) return tokenCache
       try {
         const raw = readFileSync(tokenFile(), 'utf8').trim()
-        if (/^[a-f0-9]{32,80}$/.test(raw)) { tokenCache = raw; return raw }
+        if (/^[a-f0-9]{32,80}$/.test(raw)) {
+          tokenCache = raw
+          try { tokenIssuedAt = Number(readJson(tokenMetaFile(), {})?.issuedAt) || 0 } catch { tokenIssuedAt = 0 }
+          return raw
+        }
       } catch {}
       const next = randomBytes(24).toString('hex') // 48 位 hex
+      tokenCache = next
+      tokenIssuedAt = Date.now()
       try {
         mkdirSync(dirname(tokenFile()), { recursive: true })
         writeFileSync(tokenFile(), next, 'utf8')
+        writeJsonAtomic(tokenMetaFile(), { issuedAt: tokenIssuedAt })
       } catch (error) { api.log.warn('写 host-token 失败：', String(error.message || error)) }
-      tokenCache = next
       return next
+    }
+    /** 令牌是否已过期。tokenTtlDays 默认 0（永不过期）；老令牌无签发时间时按不过期处理。 */
+    function tokenExpired() {
+      const ttl = Number(api.settings().tokenTtlDays) || 0
+      if (ttl <= 0 || !tokenIssuedAt) return false
+      return Date.now() - tokenIssuedAt > ttl * 86400_000
+    }
+    /** 轮换令牌：生成新的、旧的立即失效，并重写 host.json（客户端必须重新下载包才能连上）。 */
+    function rotateToken() {
+      const next = randomBytes(24).toString('hex')
+      const prev = tokenCache
+      tokenCache = next
+      tokenIssuedAt = Date.now()
+      try {
+        mkdirSync(dirname(tokenFile()), { recursive: true })
+        writeFileSync(tokenFile(), next, 'utf8')
+        writeJsonAtomic(tokenMetaFile(), { issuedAt: tokenIssuedAt })
+      } catch (error) {
+        tokenCache = prev // 写盘失败就回滚，别让运行中的令牌与磁盘不一致
+        return { ok: false, message: '轮换令牌失败：' + String(error?.message || error).slice(0, 120) }
+      }
+      try { writeHostFile(true) } catch {}
+      api.log.info('桌宠令牌已轮换：旧令牌立即失效，请在面板重新下载客户端包')
+      return { ok: true, message: '令牌已轮换：旧客户端会连不上，需重新下载客户端包', issuedAt: tokenIssuedAt }
     }
     const safeEqual = (a, b) => {
       if (!a || !b || a.length !== b.length) return false
       try { return timingSafeEqual(Buffer.from(a), Buffer.from(b)) } catch { return false }
+    }
+
+    // ---------- 令牌鉴权限速（公网部署防暴力猜） ----------
+    // 48 位 hex 的暴力空间本来就够大，但「无限次尝试」本身就是不该留的口子：
+    // 按来源 IP 记失败次数，超阈值后指数退避封禁（10 分钟窗口内 20 次失败 → 封 1 分钟，
+    // 每多 10 次失败封禁翻倍，上限 30 分钟）。只对「令牌错」计数，Host 闸拒绝不计。
+    const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000
+    const AUTH_FAIL_LIMIT = 20
+    const AUTH_BAN_MAX_MS = 30 * 60 * 1000
+    const authFails = new Map() // ip → { count, firstAt, bannedUntil }
+    const clientIp = (req) => {
+      // 反代场景取 X-Forwarded-For 第一跳（外网真实来源在第一个）；直连取 socket 地址
+      const xff = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim()
+      if (xff) return xff
+      return String(req?.socket?.remoteAddress || req?.connection?.remoteAddress || 'unknown')
+    }
+    /** 返回封禁剩余毫秒（0 = 未封禁）。 */
+    function authBanRemaining(ip) {
+      const rec = authFails.get(ip)
+      if (!rec || !rec.bannedUntil) return 0
+      const left = rec.bannedUntil - Date.now()
+      if (left <= 0) { rec.bannedUntil = 0; return 0 }
+      return left
+    }
+    function recordAuthFail(ip) {
+      const now = Date.now()
+      let rec = authFails.get(ip)
+      if (!rec || now - rec.firstAt > AUTH_FAIL_WINDOW_MS) { rec = { count: 0, firstAt: now, bannedUntil: 0 }; authFails.set(ip, rec) }
+      rec.count += 1
+      if (rec.count >= AUTH_FAIL_LIMIT) {
+        const over = Math.floor((rec.count - AUTH_FAIL_LIMIT) / 10)
+        const ban = Math.min(AUTH_BAN_MAX_MS, 60_000 * Math.pow(2, over))
+        rec.bannedUntil = now + ban
+        api.log.warn(`桌宠：来源 ${ip} 令牌连续失败 ${rec.count} 次，封禁 ${Math.round(ban / 1000)} 秒`)
+      }
+      // 定期清理过期记录，防 Map 无限增长（低开销：只在写入时顺手清）
+      if (authFails.size > 512) {
+        for (const [k, v] of authFails) { if (now - v.firstAt > AUTH_FAIL_WINDOW_MS && !(v.bannedUntil > now)) authFails.delete(k) }
+      }
+    }
+    function recordAuthOk(ip) {
+      const rec = authFails.get(ip)
+      if (rec) authFails.delete(ip) // 成功即清空该 IP 的失败记录
     }
 
     // ---------- 远端直连（publicBaseUrl，2026-11-02）----------
@@ -185,6 +270,10 @@ export default {
     // writeHostFile / learnHost / guard 的行为与旧版逐字节一致——这是「同机零退化」的实现点。
     const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1']
     let learnedPublic = '' // 反代 X-Forwarded-Proto/Host 兜底学习的对外地址（只在没显式配置时用）
+    /** 明文 http 是否被允许用于跨机直连。默认**不允许**：令牌与气泡内容在公网明文传输等于送人。
+     *  内网自测（如 http://192.168.1.5）可显式开 ext.pet.allowInsecureRemote 放行，
+     *  但那只适合「自己知道自己在内网」的场景。回环地址永远允许（不跨机）。 */
+    const insecureRemoteAllowed = () => api.settings().allowInsecureRemote === true
     /** 当前生效的对外地址：{ url, host } 或 null（未配置且未学到 → 纯同机模式）。 */
     function publicBase() {
       const raw = String(api.settings().publicBaseUrl || '').trim().replace(/\/+$/, '')
@@ -195,6 +284,12 @@ export default {
         try { const u = new URL(learnedPublic); if (u.hostname) return { url: learnedPublic, host: u.hostname.toLowerCase().replace(/^\[|\]$/g, '') } } catch {}
       }
       return null
+    }
+    /** 对外地址是否是不安全的明文（http 且非回环）。用于 host.json 写盘警告与面板提示。 */
+    function publicBaseInsecure() {
+      const pb = publicBase()
+      if (!pb) return false
+      return /^http:\/\//i.test(pb.url) && !isLoopbackHost(pb.host)
     }
     const isLoopbackHost = (h) => LOOPBACK_HOSTS.includes(String(h || '').toLowerCase().replace(/^\[|\]$/g, ''))
     /** Host/Origin 主机名是否放行：回环 或 与对外地址主机名一致（端口段忽略，真正鉴权交给 x-pet-token）。 */
@@ -222,6 +317,14 @@ export default {
         api: `/aurabot/api`,
         pluginVersion: api.version,
         updatedAt: new Date(now).toISOString(),
+      }
+      // 明文跨机警告：不让它静悄悄地跑（令牌与气泡在公网明文传输 = 送人）
+      if (publicBaseInsecure()) {
+        if (insecureRemoteAllowed()) {
+          api.log.warn(`桌宠对外地址是明文 http（${data.baseUrl}）：已按 allowInsecureRemote 放行，仅建议内网使用`)
+        } else {
+          api.log.error(`桌宠对外地址是明文 http（${data.baseUrl}）：**已阻断跨机访问**。请在反向代理上启用 https，或在配置里显式打开 allowInsecureRemote（只建议内网自测）`)
+        }
       }
       try { writeJsonAtomic(hostFile(), data) } catch (error) { api.log.warn('写 host.json 失败：', String(error.message || error)) }
     }
@@ -285,6 +388,11 @@ export default {
       // 绝不「Host 与请求自报的 X-Forwarded-Host 一致就放行」：X-Forwarded-* 不是浏览器禁设头，
       // 页面 JS 用 fetch 就能伪造，那样 DNS rebinding 场景下一发就绕过 Host 闸。
       if (!learned || !hostAllowed(learned.host)) return deny(res, 403, '只接受本机回环或已配置对外地址（publicBaseUrl）的访问（Host 头不匹配）')
+      // 明文 http 的跨机访问默认阻断：令牌与气泡内容在公网明文传输，等于把唯一防线送出去。
+      // 回环请求不受影响（同机零退化）；内网自测可用 allowInsecureRemote 显式放行。
+      if (!learned.loopback && publicBaseInsecure() && !insecureRemoteAllowed()) {
+        return deny(res, 403, '拒绝明文 http 的跨机访问：请给插件配上 https（反向代理）后再用远端直连；仅内网自测可显式打开 allowInsecureRemote')
+      }
       const isGet = (req.method || 'GET').toUpperCase() === 'GET'
       if (!isGet) {
         const origin = String(req.headers?.origin || '')
@@ -298,8 +406,18 @@ export default {
         if (!ct.includes('application/json')) return deny(res, 415, '写操作必须是 application/json')
       }
       const q = api.core.http.query(req)
+      const ip = clientIp(req)
+      // 先看这个 IP 是否正处于令牌暴力尝试的封禁期（公网部署必需：无限次试令牌的口子不能留）
+      const banned = authBanRemaining(ip)
+      if (banned > 0) return deny(res, 429, `令牌连续失败次数过多，请 ${Math.ceil(banned / 1000)} 秒后再试`)
       const given = String(req.headers?.['x-pet-token'] || (queryTokenOk ? q.token || '' : '') || '')
-      if (!safeEqual(given, token())) return deny(res, 401, '桌宠令牌无效：先运行一次桌宠客户端（令牌在数据目录 pet/host-token）')
+      if (!safeEqual(given, token())) {
+        recordAuthFail(ip)
+        return deny(res, 401, '桌宠令牌无效：先运行一次桌宠客户端（令牌在数据目录 pet/host-token）')
+      }
+      // 令牌本身对但已过期：提示轮换，不当作普通鉴权失败计数（持有正确令牌的人不是攻击者）
+      if (tokenExpired()) return deny(res, 401, '桌宠令牌已过期（tokenTtlDays）：请在面板点「轮换令牌」并重新下载客户端包')
+      recordAuthOk(ip)
       // 鉴权已通过才允许「学习并写盘」。顺序不能反：学习会改写 host.json 的 baseUrl，而 hostAllowed()
       // 又读它——一旦挪到 token 校验之前，任何未鉴权的伪造 Host/X-Forwarded 请求都能把 baseUrl 投毒成
       // 攻击者地址，同时借被污染的 publicBase() 绕过 Host 闸，最终把桌宠客户端的 bearer 令牌引到攻击者服务器。
@@ -962,24 +1080,23 @@ export default {
       eocd.writeUInt32LE(offset, 16) // central directory 起始偏移
       return Buffer.concat([...parts, cdBuf, eocd])
     }
-    /** 打客户端包：installClient() 先生成 app/，再递归收集 + 附 host.json。返回 { ok, filename, buffer, message }。 */
+    /** 打客户端包：installClient() 先生成 app/，只收客户端源码文件 + 附 host.json。
+     *  【为什么不再递归整目录】app/ 里可能有 electronInstall() 装的 node_modules/electron/dist/
+     *  （win 平台 electron.exe 单文件就 249MB），整目录递归打出来的 zip 实测 161MB——既拖慢下载，
+     *  又是个白送的流量放大器。客户端只需要那几个源码文件，按白名单逐个取（不递归）。 */
+    const PACKAGE_FILES = [...CLIENT_FILES, ...CLIENT_OPTIONAL]
     function clientPackage() {
       try {
         const r = installClient()
         if (!r.ok) return { ok: false, message: r.message }
         const dir = appDir()
         const entries = []
-        const walk = (d, rel) => {
-          let list = []
-          try { list = readdirSync(d, { withFileTypes: true }) } catch { return }
-          for (const e of list) {
-            const p = join(d, e.name)
-            const name = rel ? `${rel}/${e.name}` : e.name
-            if (e.isDirectory()) walk(p, name)
-            else if (e.isFile()) { try { entries.push({ name, data: readFileSync(p) }) } catch (err) { api.log.warn(`打客户端包跳过 ${name}：`, String(err?.message || err)) } }
-          }
+        // 白名单取文件（不递归）：即使 app/ 下被塞了任何大文件也不会进包
+        for (const name of PACKAGE_FILES) {
+          const p = join(dir, name)
+          if (!existsSync(p)) continue
+          try { entries.push({ name, data: readFileSync(p) }) } catch (err) { api.log.warn(`打客户端包跳过 ${name}：`, String(err?.message || err)) }
         }
-        walk(dir, '')
         if (!entries.some((x) => x.name === 'main.js')) return { ok: false, message: '客户端包里没有 main.js：pet-client 模板可能缺失（' + join(api.dir, 'pet-client') + '）' }
         try { entries.push({ name: 'host.json', data: readFileSync(hostFile(), 'utf8') }) } catch {}
         return {
@@ -2736,6 +2853,10 @@ export default {
         electronInstalled: existsSync(electronExe()), pid: recordedPid()?.pid || null,
         client: clientStatus(), // 生成物对账：缺 behavior.js 这类「旧壳」在这里现形
         remoteClient: Boolean(publicBase()), publicBaseUrl: publicBase() ? publicBase().url : '', // 面板据此切「下载客户端包」分支
+        // 安全状态：面板据此提示「明文会被阻断 / 令牌已过期 / 可轮换」
+        publicBaseInsecure: publicBaseInsecure(), allowInsecureRemote: insecureRemoteAllowed(),
+        tokenExpired: tokenExpired(), tokenIssuedAt: tokenIssuedAt || null,
+        tokenTtlDays: Number(api.settings().tokenTtlDays) || 0,
         hostFile: hostFile(), clientDir: api.dataDir('app'), serverTime: Date.now(),
       })
     })
@@ -3002,6 +3123,7 @@ export default {
       installClient,
       download: async () => installClient(), // 面板经 /panel/pet/download 调这个（host.js 降级路径按有没有这个函数判断）
       clientPackage,                         // 远端直连：app/ 目录 + host.json 打 zip（面板「下载客户端包」同函数）
+      rotateToken,                           // 安全：轮换令牌（旧令牌立即失效，客户端需重新下载包）
       setWebPort,                            // 宿主（host.js）启动时注入真实 Web 端口，破自举死锁
       portReady,
       electronInstall,                       // 面板经 /panel/pet/electron-install 调（npmmirror 镜像装 Electron）
