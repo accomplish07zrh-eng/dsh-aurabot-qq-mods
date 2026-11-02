@@ -9,7 +9,7 @@
 // 全程 AURABOT_DATA_DIR 隔离，fake api 模仿 modules.js 的 makeApi 面，不引入新依赖。
 import { test, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync, cpSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -806,6 +806,44 @@ test('zip 解压：Unix 普通文件不因权限位被误判成符号链接（0o
   assert.ok(existsSync(join(pkgRoot, 'dist', 'resources', 'default_app.asar')), '普通文件（0o100644）必须照常解出来，不能被当符号链接跳过')
   assert.ok(existsSync(join(pkgRoot, 'dist', 'locales', 'zh-CN.pak')), '普通文件同样照常解出')
   assert.ok(!existsSync(join(pkgRoot, 'dist', 'link-to-exe')), '符号链接条目跳过（不落地成普通文件）')
+})
+
+test('Electron 宿主 asar 补丁：解压/清理必须走 original-fs，否则写 resources/default_app.asar 会被拦成 Invalid package', async () => {
+  // 真机踩过的坑：DSH 跑在 Electron 里，主进程 node:fs 对任何 `.asar` 路径都先当「asar 包」打开，
+  // 官方 electron zip 里的 resources/default_app.asar 一写就抛 `Invalid package <path>`（纯 Node 不复现）。
+  // 这里注入「未打补丁」的假 fsRaw：只要 .asar 的写入/删除都经过它，就证明解压绕开了 asar 补丁。
+  const env = startModule()
+  const appDir = env.api.dataDir('app')
+  await env.exports.download() // 先有 app/main.js
+  const pkgRoot = join(appDir, 'node_modules', 'electron')
+  const exe = join(appDir, 'node_modules', 'electron', ELECTRON_REL)
+  const fakeZip = tinyZip(officialZipEntries())
+  const rawWrites = []
+  const rawRemoves = []
+  const fsRaw = {
+    writeFileSync: (p, data) => { rawWrites.push(String(p)); writeFileSync(p, data) },
+    chmodSync: () => {},
+    cpSync: (from, to, opts) => cpSync(from, to, opts),
+    rmSync: (p, opts) => { rawRemoves.push(String(p)); rmSync(p, opts) },
+  }
+  const env2 = startModule({
+    hooks: {
+      npmCli: '',
+      fsRaw,
+      fetchZip: async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) }),
+    },
+  })
+  const r = await env2.exports.electronInstall()
+  assert.equal(r.ok, true, `走原始 fs 应能装成功：${r.message}`)
+  assert.ok(existsSync(exe), '可执行文件落到 dist/')
+  assert.ok(
+    rawWrites.some((p) => p.endsWith('default_app.asar')),
+    'resources/default_app.asar 必须用 original-fs 写（用 node:fs 在 Electron 宿主里会抛 Invalid package）',
+  )
+  // 可执行文件名平台相关（win electron.exe / linux electron / mac Electron.app/…），按实际 payload 相对路径断言
+  assert.ok(rawWrites.some((p) => p.endsWith(ZIP_EXE_REL)), '可执行文件同样走原始 fs')
+  assert.ok(rawRemoves.some((p) => p.endsWith('.unzip')), '暂存目录清理也走原始 fs（里面还有 .asar，node:fs 删不动）')
+  assert.ok(!existsSync(join(pkgRoot, '.unzip')), '临时解压目录清理干净')
 })
 
 test('Electron 兜底直装失败：镜像给的不是 zip（HTML 错误页/断流）→ 报「不是有效的 zip」，不误报平台不匹配', async () => {

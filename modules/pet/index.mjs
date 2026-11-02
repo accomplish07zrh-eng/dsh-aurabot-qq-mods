@@ -24,6 +24,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFi
 import { join, dirname, sep, basename, extname } from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { inflateRawSync } from 'node:zlib'
 
 const ONLINE_TTL = 60_000        // 心跳超时：60 秒内没轮询过 /events 就算离线
@@ -34,7 +35,7 @@ const MIN_MS = 60_000            // 一分钟（碎碎念间隔/静默窗口都�
 export default {
   id: 'pet',
   name: '桌宠',
-  version: '1.0.7',
+  version: '1.0.8',
   api: 1,
   description: '把大肥鱼请到桌面上：会冒气泡、做小动作，你在干活时也陪着你。',
 
@@ -724,6 +725,18 @@ export default {
     const petHooks = api.__petTestHooks || {}
     const spawnFn = petHooks.spawn || nodeSpawn
     const killFn = petHooks.kill || ((pid) => { process.kill(Number(pid), 'SIGTERM'); return true })
+    // Electron 宿主保险（真机踩过）：DSH 跑在 Electron 里，**主进程的 fs 带 asar 补丁**——路径里只要出现
+    // `.asar`，openSync 就先按「打开 asar 包」处理，去读文件头；读不到直接抛
+    // `Invalid package <path>`（Electron 45 实测，堆栈落在 node:electron/js2c/node_init 的 openSync 包装）。
+    // 官方 electron zip 里恰好有 `resources/default_app.asar`，所以纯 Node 下没问题的解压/清理/搬运
+    // 一旦放进插件宿主就全炸在写这个文件上（历史上的「zip 直装失败：Invalid package …」就是它）。
+    // 解法：所有可能碰到 `.asar` 的写/删/复制都走 Electron 暴露的 original-fs（未打补丁的 node fs）；
+    // 纯 Node（测试、裸机 CLI）没有 original-fs，退回 node:fs 即可。测试可用 petHooks.fsRaw 注入假 fs 断言。
+    const rawFs = () => {
+      if (petHooks.fsRaw) return petHooks.fsRaw
+      try { return createRequire(import.meta.url)('original-fs') } catch { return null }
+    }
+
     const cleanElectronEnv = () => {
       const env = { ...process.env }
       delete env.ELECTRON_RUN_AS_NODE
@@ -767,6 +780,12 @@ export default {
     function unzipTo(zip, destDir) {
       const u32 = (o) => zip.readUInt32LE(o)
       const u16 = (o) => zip.readUInt16LE(o)
+      // 写文件/改权限必须走未打补丁的 fs：官方 zip 里的 resources/default_app.asar，在 Electron 宿主里
+      // 用 node:fs 写会抛 `Invalid package <path>`（见 rawFs 注释）。测试钩子可注入 fsRaw 验证这一点。
+      const fsx = rawFs()
+      const writeRaw = fsx?.writeFileSync ? fsx.writeFileSync.bind(fsx) : writeFileSync
+      const chmodRaw = fsx?.chmodSync ? fsx.chmodSync.bind(fsx) : chmodSync
+
       // 从尾部往前找 EOCD（0x06054b50），兼容最长 64KB 的 zip 注释区
       let eocd = -1
       for (let i = zip.length - 22; i >= Math.max(0, zip.length - 22 - 65535); i--) {
@@ -798,8 +817,8 @@ export default {
         const dataOff = localOff + 30 + u16(localOff + 26) + u16(localOff + 28)
         const data = method === 0 ? Buffer.from(zip.subarray(dataOff, dataOff + csize)) : inflateRawSync(zip.subarray(dataOff, dataOff + csize))
         mkdirSync(dirname(target), { recursive: true })
-        writeFileSync(target, data)
-        if (process.platform !== 'win32' && ((externAttr >>> 16) & 0o111)) chmodSync(target, 0o755) // unix 可执行位
+        writeRaw(target, data)
+        if (process.platform !== 'win32' && ((externAttr >>> 16) & 0o111)) chmodRaw(target, 0o755) // unix 可执行位
       }
     }
 
@@ -928,13 +947,17 @@ export default {
 
     /** 把 src 里的条目整体搬进 dest（同盘 rename；跨盘/被占用时回退「复制 + 删源」）。 */
     function moveInto(src, dest) {
+      // 搬运目标里含 resources/default_app.asar：复制/删源同样要走未打补丁的 fs（见 rawFs 注释）
+      const fsx = rawFs()
+      const cpRaw = fsx?.cpSync ? fsx.cpSync.bind(fsx) : cpSync
+      const rmRaw = fsx?.rmSync ? fsx.rmSync.bind(fsx) : rmSync
       mkdirSync(dest, { recursive: true })
       for (const name of readdirSync(src)) {
         const from = join(src, name)
         const to = join(dest, name)
         try { renameSync(from, to) } catch {
-          cpSync(from, to, { recursive: true })
-          rmSync(from, { recursive: true, force: true })
+          cpRaw(from, to, { recursive: true })
+          rmRaw(from, { recursive: true, force: true })
         }
       }
     }
@@ -944,11 +967,15 @@ export default {
       const zipFile = join(appDir(), 'electron.zip')
       const pkgRoot = join(appDir(), 'node_modules', 'electron')
       const stage = join(pkgRoot, '.unzip')
+      // 清目录也得走原始 fs：上一次失败留下的 .unzip 里就有 default_app.asar，
+      // 在 Electron 宿主里用 node:fs 递归删会同样抛 Invalid package
+      const fsx = rawFs()
+      const rmRaw = fsx?.rmSync ? fsx.rmSync.bind(fsx) : rmSync
       try {
         const zip = await fetchZipTo(url, zipFile)
         // 能走到这里说明 pkgRoot 里本来就没有可用安装：清空重装。顺手清掉旧版本留下的垃圾
         // （旧版把扁平 zip 直接解到 pkgRoot，留下 electron.exe + 一百多 MB 散文件）和 npm 的半成品。
-        try { rmSync(pkgRoot, { recursive: true, force: true }) } catch (error) {
+        try { rmRaw(pkgRoot, { recursive: true, force: true }) } catch (error) {
           throw new Error(`旧的 electron 目录删不掉（${String(error?.code || error?.message || error)}）：先点「停止桌宠」再装`)
         }
         mkdirSync(stage, { recursive: true })
@@ -967,7 +994,7 @@ export default {
         return { ok: false, message: `zip 直装失败：${String(error?.message || error).slice(0, 240)}（可换个网络再点一次，或看 USER-MANUAL 的手动安装教程）` }
       } finally {
         try { unlinkSync(zipFile) } catch {}
-        try { rmSync(stage, { recursive: true, force: true }) } catch {}
+        try { rmRaw(stage, { recursive: true, force: true }) } catch {}
       }
     }
 

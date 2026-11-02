@@ -7,7 +7,8 @@
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font-family: "Microsoft YaHei", sans-serif; user-select: none; }
   /* 舞台：动画 / 静态形象都在这里，整块可拖拽（拖拽不用 -webkit-app-region，那样会吞掉指针事件，
      JS 拖拽才能采到轨迹算甩抛初速，见 physics.js）。
-     高度 240：素材全是 1:1 正方形 webm，宽 240 → 高也是 240。 */
+     高度 240：素材真实规格是 640×360（16:9），人物画在画面中下部约 222×268 的透明框里；
+     渲染页按人物包围盒放大裁切（见脚本 detectCharBox/applyStageCrop），让人物填满 240×240 舞台。 */
   #stage {
     position: absolute; left: 20px; bottom: 16px; width: 240px; height: 240px;
     cursor: grab; touch-action: none;
@@ -26,12 +27,12 @@
   #pet.mood-neutral { transform: none; }
   #pet.mood-low { transform: scale(.94); filter: saturate(.7); }
   #pet.mood-sad { transform: scale(.88) rotate(4deg); filter: saturate(.4) brightness(.9); }
-  /* webm 动画层（P1）：素材就绪时盖住静态形象（1:1 素材，宽 240 → 高 240，与舞台同大） */
+  /* webm 动画层（P1）：素材就绪时盖住静态形象。默认按 240 宽渲染（640×360 素材 → 135 高），
+     首帧后由 applyStageCrop 放大平移，让人物填满舞台（行内 width/height/left/bottom 会覆盖这里） */
   #anim { position: absolute; left: 0; bottom: 0; width: 240px; display: none; }
   #anim.squashing { transform-origin: 50% 100%; }
-  /* 气泡：锚在宠物头顶（1:1 素材，宠物头顶在窗口底往上 16+240=256px 处），向上生长、中心对齐。
-     原来是 left:8/top:0 —— 气泡飘在宠物头顶上方的空白里，和桌宠完全脱节；
-     长文本还会向下生长压到宠物身上。窗口高 430：16(底距)+240(宠物)+12(缝)+154(气泡)+8(顶距)。 */
+  /* 气泡：锚在宠物头顶（人物裁切后头顶≈舞台上沿，即窗口底往上 16+240=256px），向上生长、中心对齐。
+     窗口高随内容伸缩：气泡收起 264，弹出时主进程按气泡实高向上长（上限 430）。 */
   #bubble {
     position: absolute; left: 20px; bottom: 268px; width: 240px; box-sizing: border-box;
     background: rgba(255, 255, 255, .97); border: 1px solid #bcd9ea; border-radius: 12px;
@@ -70,6 +71,62 @@
   const video = document.getElementById('anim')
   const P = window.PetPhysics
 
+  // ---------- 素材裁边（修「桌宠上方空白区域过大」）----------
+  // 实测：素材真实规格是 **640×360（16:9）**，人物只画在画面中下部约 222×268 的框里，
+  // 四周全透明（早先注释写「1:1 方形 240×240」是错的，导致舞台/窗口按 240 高留白）。
+  // 做法：拿到首帧后扫一遍像素求人物包围盒，再把 <video> 放大平移，让人物刚好填满舞台——
+  // 底边贴舞台底（脚踩地面）、水平居中。舞台仍是 240×240，拖拽/物理/命中都不用改。
+  // 39 段动画包围盒几乎一致（y 63~330），所以一次性裁切安全；换包时重算。
+  let cropDone = false
+  function detectCharBox() {
+    try {
+      const vw = video.videoWidth, vh = video.videoHeight
+      if (!vw || !vh || video.readyState < 2) return null
+      const cv = document.createElement('canvas')
+      cv.width = vw; cv.height = vh
+      const ctx = cv.getContext('2d', { willReadFrequently: true })
+      ctx.drawImage(video, 0, 0, vw, vh)
+      const d = ctx.getImageData(0, 0, vw, vh).data
+      let x0 = vw, y0 = vh, x1 = -1, y1 = -1
+      for (let y = 0; y < vh; y++) {
+        for (let x = 0; x < vw; x++) {
+          const i = (y * vw + x) * 4
+          // 透明区正常 alpha=0；个别平台 canvas 拿不到 alpha 会退化成纯黑，两种都当背景
+          if (d[i + 3] > 8 && d[i] + d[i + 1] + d[i + 2] > 24) {
+            if (x < x0) x0 = x
+            if (x > x1) x1 = x
+            if (y < y0) y0 = y
+            if (y > y1) y1 = y
+          }
+        }
+      }
+      if (x1 < 0) return null
+      return { x0, y0, w: x1 - x0 + 1, h: y1 - y0 + 1, vw, vh }
+    } catch { return null } // 画布被污染等：不裁，保持原样（宁可空白也别出错）
+  }
+  function applyStageCrop() {
+    if (cropDone) return
+    const bb = detectCharBox()
+    if (!bb) return
+    const STAGE_W = 240, STAGE_H = 240 // 与 CSS #stage 一致
+    const k = Math.min(STAGE_H / bb.h, STAGE_W / bb.w) // 人物填满舞台高的缩放（本来就宽就按宽收）
+    if (k <= (240 / bb.vw) * 1.08) { cropDone = true; return } // 素材本来就满格：别白折腾
+    video.style.width = (bb.vw * k) + 'px'
+    video.style.height = (bb.vh * k) + 'px'
+    video.style.left = (STAGE_W / 2 - (bb.x0 + bb.w / 2) * k) + 'px'
+    video.style.bottom = (-(bb.vh - (bb.y0 + bb.h)) * k) + 'px' // 人物底边贴舞台底
+    cropDone = true
+  }
+  function resetStageCrop() {
+    cropDone = false
+    video.style.width = ''
+    video.style.height = ''
+    video.style.left = ''
+    video.style.bottom = ''
+  }
+  video.addEventListener('loadeddata', applyStageCrop)
+
+
   // ---------- 形象包（P1/P4）：动画池 + 权重 + 物理参数；缺素材回静态形象 ----------
   let packAnims = {}   // 动画名 → 带 token 的素材地址（主进程给）
   let pools = { idle: [], speak: [], click: [] }
@@ -78,6 +135,7 @@
   let workMap = {}     // 干活状态 → 动画 id（服务端按命名约定/包配置解析好）
   window.__setPack = (p) => {
     packAnims = p && p.anims ? p.anims : {}
+    resetStageCrop() // 换包：上一份素材的裁切量不能套到新素材上，等首帧重新量
     coolDown = {} // 主进程重推素材表（重连/换包）：冷却全部清零，从干净状态开始
     pools = (p && p.pools) || { idle: [], speak: [], click: [] }
     weights = (p && p.weights) || {}
@@ -251,15 +309,31 @@
     pet.className = 'mood-' + (mood || 'neutral')
     clearTimeout(bubbleTimer)
     bubbleTimer = setTimeout(hide, Math.max(6500, (secs || 8) * 1000))
+    // 气泡弹出：文本写入后布局要等一帧才稳定，rAF 后量实高再让窗口向上长
+    requestAnimationFrame(refitWindow)
     // 起播动画：点播优先，其次 speak 池；点播 + 有回执号时把它带回给主进程（POST /playback）
     const name = (anim && packAnims[anim]) ? anim : pickFrom('speak')
     const played = (anim && playbackId && packAnims[anim]) ? { anim, playbackId } : null
     if (name) playAnim(name, null, 'speak')
     return played
   }
-  function hide() { bubble.classList.remove('show') }
+  function hide() {
+    bubble.classList.remove('show')
+    refitWindow() // 气泡收起：窗口缩回贴合宠物本体（见下方 refitWindow）
+  }
   window.__hideBubble = hide
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide() })
+
+  // ---------- 窗口贴合内容（修「空白区域过大」）----------
+  // 窗口固定 430 高时，气泡区 ~166px 平时全透明却真占着屏幕（截图/共享/任务栏预览都露馅）。
+  // 规矩：气泡收起 → 上报 264（16 底距 + 240 素材 + 8 顶距）；气泡弹出 → 等一帧布局稳定后
+  // 量气泡实际高度再上报（264 + 12 缝 + 气泡高 + 8 顶距，上限 430）。主进程按倍率换算并钉住底边。
+  const REST_H = 16 + 240 + 8
+  const BUBBLE_MAX_H = 154 // 与 CSS 六行截断一致，防实测异常值顶爆上限（主进程还会再夹一次）
+  function refitWindow() {
+    const bh = bubble.classList.contains('show') ? Math.min(BUBBLE_MAX_H, bubble.offsetHeight) : 0
+    window.petBridge && window.petBridge.fitWindow(bh ? REST_H + 12 + bh + 8 : REST_H)
+  }
 
   // ---------- 落地挤压（P3）：主进程甩抛落地回调 __squash(冲击速度) ----------
   let squashToken = 0 // 单飞行：新的挤压直接接管旧的，避免多次回调叠出一堆并发的 rAF 循环
@@ -407,6 +481,8 @@
   setTimeout(() => {
     if (!hasAnims() && !currentAnim) pet.style.display = 'flex'
   }, 1500)
+  // 开局先收一次窗口：窗口模板是 430 高，渲染页就绪后没有气泡就该缩到贴合宠物本体
+  refitWindow()
 </script>
 </body>
 </html>

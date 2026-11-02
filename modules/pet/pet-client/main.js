@@ -130,8 +130,13 @@ function pushPackToRenderer() {
 let lastWorkKey = ''
 // 人物大小倍率（服务端 /config 的 scale，0.5~2.0）：整窗等比缩放 = setSize + setZoomFactor，
 // 布局（舞台/气泡/字体）随 zoom 一起缩，物理身体盒由 bodyBox 按窗口宽反推，天然对上。
-const BASE_W = 280, BASE_H = 430 // createWindow 的原始窗口尺寸（缩放的基准）
+const BASE_W = 280, BASE_H = 430 // createWindow 的原始窗口尺寸（缩放的基准；BASE_H 只是「气泡全开」的上限）
 let curScale = 1
+// 当前「贴合内容」所需的基础高度（缩放前 px，由渲染页按气泡是否显示上报，见 pet:fit）。
+// applyScale 必须乘它、而不是 BASE_H：否则 /config 的 scale 一到达就把窗口按 430 重设，
+// 刚缩掉的上方空白又被加回来（实测过：窗口先 290 后跳回 473）。
+const REST_H = 264 // 16(底距)+240(舞台)+8(顶距)
+let fitBaseH = REST_H
 // 松手后落地开关（服务端 /config 的 releaseLand）：开 = 按甩出速度抛出去并落回地面（原行为）；
 // 关 = 拖到哪松手就停在哪（不抛也不落，连「温柔放下」的原地掉落也一并停掉）。
 // 拦截点放主进程 pet:throw 一处：渲染页的甩抛（pet:throw）和原地掉落（throwWith(0,0)）都走这条通道。
@@ -143,7 +148,7 @@ function applyScale(s) {
   curScale = v
   try {
     win.setResizable(true) // 创建时是 resizable:false，编程改尺寸前临时放开
-    win.setSize(Math.round(BASE_W * v), Math.round(BASE_H * v))
+    win.setSize(Math.round(BASE_W * v), Math.round(fitBaseH * v)) // 高度跟当前贴合值走，别按 430 撑回原样
     win.setResizable(false)
     win.webContents.setZoomFactor(v)
   } catch {}
@@ -293,11 +298,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // 两个坑（都是「扔出去就卡死」的直接原因）：
 //   1) 不能用 setImmediate 递归驱动：每秒会跑几千帧，每帧同步调一次 win.setPosition，
 //      主进程/窗口线程被空转调用打满，桌宠看起来就定住了。这里固定 60fps。
-//   2) 边界必须用真实身体盒：素材是 1:1 正方形（宽 240 → 高也是 240），宠物画在窗口底部，
-//      若按 宽×9/16 当身体高，静止点会比屏幕底还低 183px —— 一扔就掉出屏幕外再也不回来。
+//   2) 边界必须用真实身体盒：素材是 640×360（16:9），人物画在中下部透明框里；渲染页会按人物包围盒
+//      裁切放大填满 240×240 舞台（见 index.html applyStageCrop），所以「可见身体」仍是窗口底部 240×240，
+//      按舞台反推即可。若按 宽×9/16 当身体高，静止点会比屏幕底还低 183px —— 一扔就掉出屏幕外再也不回来。
 const THROW_FRAME_MS = 16   // ≈60fps
 const THROW_MAX_MS = 10000  // 一次抛掷最多算 10 秒，之后强制落地（兜底，绝不留半空死状态）
-const BODY = { left: 20, bottom: 16, width: 240, height: 240 } // 与 index.html 的 #stage 一致（1:1 素材）
+const BODY = { left: 20, bottom: 16, width: 240, height: 240 } // 与 index.html 的 #stage 一致（裁切后人物填满舞台）
 let thrower = null          // 抛掷循环定时器句柄（非空 = 正在飞）
 
 /** 可见身体（#stage）在窗口内的盒子：offsetX/offsetY 是身体左上角相对窗口左上角的偏移。
@@ -1598,6 +1604,30 @@ ipcMain.on('pet:click', () => { if (behaviorActionEnabled('chase_cursor')) react
 ipcMain.on('pet:hit', (_e, hit) => {
   if (!win || win.isDestroyed()) return
   try { win.setIgnoreMouseEvents(!hit, { forward: true }) } catch {}
+})
+// 窗口贴合内容（修「空白区域过大」）：窗口本来固定 430 高，气泡区 166px 平时全透明却真占着屏幕。
+// 现在渲染页按内容上报基础高度（气泡收起=264，气泡弹出=264+12+气泡实高+8，上限 430），
+// 主进程乘当前倍率后改窗高，**底边不动**（窗口向上长/向下缩，桌宠位置视觉不变）。
+// 渲染页报的是缩放前的 CSS px（zoomFactor 只缩内容），这里统一乘 curScale 换算成真实窗口像素。
+ipcMain.on('pet:fit', (_e, baseH) => {
+  if (!win || win.isDestroyed()) return
+  // 记住「内容需要的基础高度」：applyScale 之后 /config 的 scale 变化时也按它算，别回到 430
+  fitBaseH = Math.min(BASE_H, Math.max(REST_H, Math.round(Number(baseH)) || REST_H))
+  const minH = Math.round(REST_H * curScale)  // 气泡收起：16(底距)+240(舞台)+8(顶距)
+  const maxH = Math.round(BASE_H * curScale)   // 兜底上限：6 行长文本也放得下
+  const h = Math.min(maxH, Math.max(minH, Math.round(fitBaseH * curScale)))
+  const [w, oldH] = win.getSize()
+  if (h === oldH) return
+  try {
+    const [, y] = win.getPosition()
+    win.setResizable(true) // 创建时是 resizable:false，编程改尺寸前临时放开
+    win.setSize(w, h)
+    const ny = y + oldH - h // 高度差全补在 y 上 = 底边钉住
+    win.setPosition(win.getPosition()[0], ny)
+    // 窗口位置变了，移动基线也要跟上：不然拖拽去重拿陈基线会把第一帧当「重复坐标」吞掉
+    lastMove = { x: win.getPosition()[0], y: ny }
+    win.setResizable(false)
+  } catch {}
 })
 ipcMain.handle('pet:screen', () => {
   if (!win) return null

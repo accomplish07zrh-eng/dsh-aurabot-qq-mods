@@ -51,7 +51,7 @@
 | GET | `/asset/<包>/<文件>.webm?token=` | 形象包素材（P1）。**严格隔离**：只服务该包 `-animation/` 目录里的文件；缺文件/越包访问/路径穿越一律 404，**绝不回落 default**。`Cache-Control: private` |
 | GET | `/audio/<sha1>.wav?token=` | 语音文件；`Cache-Control: private`；不存在 404 |
 | POST | `/client/install` | 把模块自带 `pet-client/` 生成到 `app/`，返回 `{ok, dir, files, message}` |
-| POST | `/electron-install` | 两档自动安装（已装则跳过并提示）：① 环境里有 npm-cli.js → 在 `app/` 下 `npm i -D electron`（注入 `ELECTRON_MIRROR=<electronMirror>`，默认 npmmirror，真机直连 github release 会 fetch failed；不走 shell），**npm 失败自动回退 ②**；② 没有 npm（DSH 自带运行时不带 npm-cli、目标电脑可能没装 Node）→ **zip 直装**：从同一镜像下载 electron 官方 zip（版本取 `app/package.json`），Node 自带 zlib 纯 JS 解压到 `app/node_modules/electron/dist/`（官方 zip 是扁平包，先解到临时目录认出 payload 根再搬进 `dist/`，与 npm 布局一致），零环境依赖。返回进度摘要 |
+| POST | `/electron-install` | 两档自动安装（已装则跳过并提示）：① 环境里有 npm-cli.js → 在 `app/` 下 `npm i -D electron`（注入 `ELECTRON_MIRROR=<electronMirror>`，默认 npmmirror，真机直连 github release 会 fetch failed；不走 shell），**npm 失败自动回退 ②**；② 没有 npm（DSH 自带运行时不带 npm-cli、目标电脑可能没装 Node）→ **zip 直装**：从同一镜像下载 electron 官方 zip（版本取 `app/package.json`），Node 自带 zlib 纯 JS 解压到 `app/node_modules/electron/dist/`（官方 zip 是扁平包，先解到临时目录认出 payload 根再搬进 `dist/`，与 npm 布局一致），零环境依赖。**解压/搬运/清理必须走 `original-fs`**（宿主是 Electron，主进程 `node:fs` 的 asar 补丁会把写 `resources/default_app.asar` 拦成 `Invalid package <path>`；详见下方「Electron 安装」）。返回进度摘要 |
 | POST | `/launch` | 分离进程启动 `electron.exe main.js`。**启动前必须清掉子进程环境的 `ELECTRON_RUN_AS_NODE`**（宿主环境必带，不清则 Electron 以纯 Node 模式启动即崩）。已在跑（心跳活着）则提示；pid 记进 `process.json` |
 | POST | `/stop` | 杀 `process.json` 记录的 pid 并清记录；进程已不在（ESRCH）按已停止处理 |
 
@@ -342,6 +342,7 @@ Electron 运行时**不是本插件的依赖**，也**不会在启动/更新时�
      这里先解到临时目录、认出 payload 根再搬进 `dist/`，与 npm 包布局一致；同时写 `path.txt`；
      带 zip-slip 防护，unix 恢复可执行位），
      不需要 npm、不需要 shell、不需要系统里装任何东西。
+    - **Electron 宿主坑（1.0.8 修）**：DSH 跑在 Electron 里，主进程 `node:fs` 带 asar 补丁——路径里出现 `.asar` 就会先按「打开 asar 包」处理，官方 zip 里的 `resources/default_app.asar` 一写就抛 `Invalid package <path>`（纯 Node 不复现）。所以 `unzipTo` / `moveInto` / 暂存清理全部走 `original-fs`（`createRequire(import.meta.url)('original-fs')`，纯 Node 下退回 `node:fs`）；回归用例注入 `petHooks.fsRaw` 断言 `.asar` 确实经原始 fs 写入和清理。
    已装（`electron.exe` 存在）则跳过。两档都只装 `app/package.json` 固定的版本，不拉 `latest`。
 3. **启动 / 停止**（面板「启动桌宠 / 退出」）：仅启动用户已确认安装的本地 Electron，
    不下载任何东西。

@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('petBridge', {
   screenInfo: () => ipcRenderer.invoke('pet:screen'),
   /** 停住主进程的抛掷循环（例如用户在飞行中又按住）。 */
   stopThrow: () => ipcRenderer.send('pet:throw-stop'),
+  /** 窗口贴合内容：渲染页按「气泡是否显示/气泡实际高度」上报需要的基础高度（缩放前 px），
+   *  主进程按当前倍率换算后向上长高/向下缩回，避免 430 高的透明空白常驻（底边不动，桌宠不跳）。 */
+  fitWindow: (baseH) => ipcRenderer.send('pet:fit', Number(baseH) || 0),
   /** 命中检测上报：true=悬停在宠物/气泡上（窗口恢复交互），false=在透明区（点击穿透）。 */
   setHit: (hit) => ipcRenderer.send('pet:hit', Boolean(hit)),
   /** 右键菜单：渲染页 contextmenu → 主进程弹原生菜单（仿 dsh-pet 的右键菜单）。 */
