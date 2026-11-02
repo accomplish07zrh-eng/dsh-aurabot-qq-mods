@@ -1,0 +1,14 @@
+{
+  "id": "tophub",
+  "name": "热榜巡游",
+  "version": "0.1.0",
+  "description": "每天定时带鱼逛全网热榜（微博/抖音/知乎/头条等），看完把有意思的热点私聊分享给主人；同时作为基础控件，其他模块可用 hot()/search() 拿今日热点。",
+  "category": "platform",
+  "tags": ["热榜", "资讯", "巡游"],
+  "author": "Nightc",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": ["network", "filesystem", "plugin-config"]
+}
