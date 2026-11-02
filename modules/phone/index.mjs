@@ -23,7 +23,7 @@ const execFileP = promisify(execFile)
 export default {
   id: 'phone',
   name: '手机逛逛',
-  version: '0.2.0',
+  version: '0.2.1',
   api: 1,
   description: '通过 ADB 逛 Android 手机：按主人教好的流程自动签到/浏览/点赞，或自由推理完成一句话任务。',
   panel: 'panel.js',
