@@ -55,7 +55,7 @@ function sane(it) {
  * @param {object} [o.fs]       注入的 node:fs（测试用），缺省真读真写
  */
 export function createFetcher({ cacheDir, log, fetchImpl, fs, gapMs = GAP_MS, coolMs = COOL_MS } = {}) {
-  const f = fetchImpl || globalThis.fetch
+  const f = fetchImpl || ((...args) => globalThis.fetch(...args))
   const store = fs || { readFile: _readFile, writeFile: _writeFile }
   const read = (p) => { try { return store.readFile(p, 'utf8') } catch { return '' } }
   const write = (p, s) => { try { mkdirSync(cacheDir, { recursive: true }); store.writeFile(p, s) } catch { /* 缓存写失败不影响取数 */ } }
@@ -77,8 +77,26 @@ export function createFetcher({ cacheDir, log, fetchImpl, fs, gapMs = GAP_MS, co
     const r = await f(url, { headers: { 'User-Agent': UA, 'Accept': 'application/json' }, signal: AbortSignal.timeout(12_000) })
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     const j = await r.json()
-    if (!j || !Array.isArray(j.data)) throw new Error('60s 返回格式不对')
-    return j.data
+    const data = j?.data
+    // 两种结构都要认：榜单端点给数组 [{title,hot_value,link}]；
+    // 「60秒读懂世界」这类日报端点给 { date, news:[…] } 或纯字符串数组。
+    if (Array.isArray(data)) {
+      return data.map((x) => (typeof x === 'string' ? { title: x } : x))
+    }
+    if (data && Array.isArray(data.news)) {
+      return data.news.map((x) => (typeof x === 'string' ? { title: x } : { title: x?.title || x?.text || '', url: x?.link || '' }))
+    }
+    throw new Error('60s 返回格式不对')
+  }
+
+  /** 统一条目形状：榜单端点用 hot_value/link，日报用 title/news，全部归一成 { title, url, hot } */
+  function normalize(raw) {
+    const title = String(raw?.title || raw?.name || raw?.word || '').trim()
+    return {
+      title,
+      url: String(raw?.url || raw?.link || ''),
+      hot: raw?.hot_value != null ? String(raw.hot_value) : (raw?.hot != null ? String(raw.hot) : ''),
+    }
   }
 
   async function getTophub(nodeId) {
@@ -148,7 +166,7 @@ export function createFetcher({ cacheDir, log, fetchImpl, fs, gapMs = GAP_MS, co
     const errors = []
     for (const [source, fn] of tryOrder) {
       try {
-        const items = (await fn()).filter(sane).slice(0, 30)
+        const items = (await fn()).map(normalize).filter(sane).slice(0, 30)
         if (!items.length) throw new Error('取到 0 条')
         const rec = { ts: Date.now(), source, items }
         cachePut(key, rec)

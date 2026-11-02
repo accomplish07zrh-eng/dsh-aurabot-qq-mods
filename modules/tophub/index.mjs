@@ -7,10 +7,11 @@ import { createBrowse } from './lib/browse.mjs'
 
 export default {
   id: 'tophub',
-  name: '热榜巡游',
-  version: '0.1.0',
+  name: '刷热榜',
+  version: '0.2.0',
   api: 1,
-  description: '定时逛全网热榜，挑有意思的私聊分享给主人；对外提供 hot()/search() 热点控件',
+  description: '热榜巡游：每天定时逛全网热榜，看完写记忆、挑有意思的私聊分享给主人；对外提供 hot()/search() 热点控件',
+  panel: 'panel.js',
   defaults: {
     enabled: true,
     tourTimes: '09:30,21:00',        // 每天这些时刻各逛一场（到点后的下一个 tick 触发）
@@ -87,6 +88,7 @@ export default {
     // ---- 面板路由（模块相对路径，最终挂在 /aurabot/api/ext/tophub/ 下）----
     api.route('/state', async () => ({ ok: true, ...browse.status() }))
     api.route('/run', async () => browse.tour({ fresh: true }))
+    api.route('/history', async () => ({ ok: true, items: browse.history() }))
     api.route('/hot', async (req) => {
       let node = ''
       try { node = String(new URL(req.url, 'http://x').searchParams.get('node') || '').trim() } catch { node = '' }
@@ -103,6 +105,8 @@ export default {
       nodes: () => fetcher.nodes(),
       /** 手动逛一轮（面板 /run 同款） */
       tour: (o) => browse.tour(o),
+      /** 巡游历史（面板「记录」区） */
+      history: () => browse.history(),
       /** 巡游状态 */
       status: () => browse.status(),
     }

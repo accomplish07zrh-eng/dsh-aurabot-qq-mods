@@ -152,8 +152,13 @@ test('tour：读榜 → 感想 → 限量分享到主人私聊 + 写记忆', asy
   assert.equal(sent.length, 1)
   assert.equal(sent[0].chatId, 'private:10001')
   assert.ok(sent[0].text.includes('机器人话题很火'))
-  assert.equal(remembered.length, 1)
+  // remember 一条 + 每轮必写的巡游经历一条
+  assert.equal(remembered.length, 2)
+  assert.ok(remembered.some((x) => x.tags.includes('热榜') && x.text.includes('巡游')), '每轮经历必须进记忆')
   assert.ok(thinks[0].includes('热点甲'))
+  // 历史落盘：面板「记录」区能翻到
+  assert.equal(browse.history().length, 1)
+  assert.equal(browse.history()[0].shared[0].text, '机器人话题很火')
 })
 
 test('tour：同一条感想不重复分享（seen 去重）', async () => {
@@ -167,15 +172,21 @@ test('tour：同一条感想不重复分享（seen 去重）', async () => {
   assert.equal(sent.length, 1)
 })
 
-test('tour：shareLimit=0 只看不分享；模型输出不是 JSON 也不崩', async () => {
+test('tour：shareLimit=0 只看不分享；模型输出不是 JSON 也写记忆落记录', async () => {
   const a = fakeBrowse({ enabled: true, nodes: ['微博热搜'], nodesPerTour: 1, shareLimit: 0 }, { thinkOut: GOOD_THINK })
   const ra = await a.browse.tour()
   assert.equal(ra.shared, 0)
   assert.equal(a.sent.length, 0)
+  // 没分享 ≠ 没收获：经历照样进记忆、进记录
+  assert.ok(a.remembered.some((x) => x.text.includes('巡游')))
+  assert.equal(a.browse.history().length, 1)
   const b = fakeBrowse({ enabled: true, nodes: ['微博热搜'], nodesPerTour: 1, shareLimit: 2 }, { thinkOut: '今天没啥想说的' })
   const rb = await b.browse.tour()
   assert.equal(rb.ok, false)
-  assert.ok(rb.message.includes('JSON'))
+  assert.ok(rb.message.includes('记录'))
+  // 就算模型不给感想，逛过的经历也必须留下
+  assert.ok(b.remembered.some((x) => x.text.includes('巡游')))
+  assert.equal(b.browse.history().length, 1)
 })
 
 test('tick：到点逛一场，同一天同一场次不重复逛；没到点不逛', async () => {
@@ -195,6 +206,44 @@ test('tick：到点逛一场，同一天同一场次不重复逛；没到点不�
   const day2 = fakeBrowse(cfg, { now: new Date('2026-11-03T09:31:00'), thinkOut: GOOD_THINK })
   await day2.browse.tick()
   assert.equal(day2.sent.length, 1)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('tour：模型挂掉（think 抛错）仍把逛到的榜写进记录和记忆', async () => {
+  const dir = tmpFetchDir()
+  const remembered = []
+  const browse = createBrowse({
+    api: { dataDir: (...p) => join(dir, ...p), log: { info() {}, warn() {}, error() {} }, settings: () => ({ enabled: true, nodes: ['微博热搜'], nodesPerTour: 1, itemsPerNode: 15, shareLimit: 2 }) },
+    fetcher: createFetcher({ cacheDir: join(dir, 'cache'), gapMs: 0, fetchImpl: async () => sixtyOk(['热点甲', '热点乙']) }),
+    memory: { add: (x) => remembered.push(x), recall: () => [] },
+    ownerQQ: '10001',
+    think: async () => { throw new Error('这一轮没正常结束：error') },
+    sendText: async () => {},
+  })
+  const r = await browse.tour()
+  assert.equal(r.ok, false)
+  assert.ok(r.message.includes('模型这轮没回话'))
+  // 关键：榜真拉到了，记录和记忆都不能丢
+  assert.equal(browse.history().length, 1)
+  assert.equal(browse.history()[0].boards[0], '微博热搜')
+  assert.ok(remembered.some((x) => x.text.includes('巡游')))
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('60s 日报结构（data.news 字符串数组）也认，条目归一出 title', async () => {
+  const dir = tmpFetchDir()
+  const f = createFetcher({
+    cacheDir: dir, gapMs: 0,
+    fetchImpl: async (url) => {
+      if (String(url).includes('tophub.today')) throw new Error('HTTP 403')
+      return { ok: true, json: async () => ({ code: 200, data: { date: '2026-11-02', news: ['今天的第一条新闻', '第二条新闻'] } }) }
+    },
+  })
+  const r = await f.hot('60秒读懂世界')
+  assert.equal(r.ok, true)
+  assert.equal(r.items.length, 2)
+  assert.equal(r.items[0].title, '今天的第一条新闻')
+  assert.equal(r.items[0].url, '')
   rmSync(dir, { recursive: true, force: true })
 })
 

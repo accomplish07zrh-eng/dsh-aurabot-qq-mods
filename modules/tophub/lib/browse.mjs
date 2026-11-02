@@ -89,14 +89,16 @@ export function createBrowse({ api, fetcher, memory, ownerQQ, think, sendText, n
     touring = true
     try {
       const c = cfg()
-      const picked = await pick(o.nodes)
-      if (!picked.length) return { ok: false, message: '没有可逛的榜（取数全失败了，等冷却过再试）' }
 
-      // 读榜：每个榜前 N 条喂给她，给感想
+      // 读榜：按候选顺序逐个试，攒够 count 个成功的就停——个别榜死了换替补，不整轮报废
+      const count = Math.max(1, Number(cfg().nodesPerTour) || 2)
+      const candidates = await pickCandidates(o.nodes, count)
       const boards = []
-      for (const name of picked) {
+      for (const name of candidates) {
+        if (boards.length >= count) break
         const r = await fetcher.hot(name, { fresh: o.fresh })
-        if (r.ok) boards.push({ node: name, items: r.items.slice(0, c.itemsPerNode || 15) })
+        if (r.ok) boards.push({ node: name, items: r.items.slice(0, cfg().itemsPerNode || 15) })
+        else api.log?.warn?.(`榜「${name}」这轮取不到，换下一个：${r.error}`)
       }
       if (!boards.length) return { ok: false, message: '榜都拉不下来（网络或接口问题）' }
 
@@ -105,22 +107,41 @@ export function createBrowse({ api, fetcher, memory, ownerQQ, think, sendText, n
       const feed = boards.map((b) =>
         `【${b.node}】\n` + b.items.map((it, i) => `${i + 1}. ${it.title}${it.hot ? `（热度${it.hot}）` : ''}`).join('\n')
       ).join('\n\n')
-      const out = await think(
-        `你在逛全网热榜，不是聊天，这轮的产出不会自动发出去。你感兴趣的按你自己的性子来，也想想主人会喜欢什么。\n` +
-        `你记得的关于主人的事：\n${about.map((x) => '- ' + (x.text || x)).join('\n') || '（暂无）'}\n` +
-        `最近逛过的榜：\n${recentText}\n\n` +
-        `今天的热榜：\n${feed}\n\n` +
-        `看完给感想。输出 JSON 数组，每个榜一个对象：` +
-        `{"node":"榜名","feeling":"一句你的真实感受","share":"想私聊分享给主人的话（挑主人可能感兴趣的 1~3 条热点，说人话、别像播报，觉得没什么可分享就空字符串）","remember":"值得记住的一件事（没有就空字符串）"}。` +
-        `只输出 JSON。`,
-        { title: '逛热榜', timeoutMs: 180000 }
-      )
+      let out = ''
+      let thinkError = ''
+      try {
+        out = await think(
+          `你在逛全网热榜，不是聊天，这轮的产出不会自动发出去。你感兴趣的按你自己的性子来，也想想主人会喜欢什么。\n` +
+          `你记得的关于主人的事：\n${about.map((x) => '- ' + (x.text || x)).join('\n') || '（暂无）'}\n` +
+          `最近逛过的榜：\n${recentText}\n\n` +
+          `今天的热榜：\n${feed}\n\n` +
+          `看完给感想。输出 JSON 数组，每个榜一个对象：` +
+          `{"node":"榜名","feeling":"一句你的真实感受","share":"想私聊分享给主人的话（挑主人可能感兴趣的 1~3 条热点，说人话、别像播报，觉得没什么可分享就空字符串）","remember":"值得记住的一件事（没有就空字符串）"}。` +
+          `只输出 JSON。`,
+          { title: '逛热榜', timeoutMs: 180000 }
+        )
+      } catch (e) {
+        // 模型这轮挂了（限流/超时）不能连累「逛过」这件事：榜是真拉到了，记录照写
+        thinkError = e?.message || String(e)
+        api.log?.warn?.(`逛热榜：模型这轮没回话（${thinkError}），先把逛到的记下来`)
+      }
       const verdicts = parseLlmJson(out)
-      if (!verdicts?.length) return { ok: false, message: '她没给出可用的感想（输出不是 JSON）' }
+      const feelings = (verdicts || []).map((v) => String(v?.feeling || '').trim()).filter(Boolean)
+      if (!verdicts?.length) {
+        // 模型没给出可用感想也算逛过了：照常记账 + 写经历，只是没有分享
+        recordTour(boards, [], '')
+        return {
+          ok: false,
+          message: thinkError
+            ? `榜拉到了（${boards.map((b) => b.node).join('、')}），但模型这轮没回话：${thinkError}。已记入记录`
+            : '逛完了但她没给出可用的感想（输出不是 JSON），已记入记录',
+        }
+      }
 
       // 产出：分享（去重 + 限量）、记忆
       const limit = Math.max(0, Number(c.shareLimit) || 0)
       let shared = 0, remembered = 0
+      const sharedList = []
       for (const v of verdicts) {
         if (!v || typeof v !== 'object') continue
         if (v.remember && remembered < 3) {
@@ -135,12 +156,12 @@ export function createBrowse({ api, fetcher, memory, ownerQQ, think, sendText, n
           seenSet.add(fp(v.feeling + share))
           seen.push(fp(v.feeling + share))
           shared++
+          sharedList.push({ node: v.node, text: share })
         }
       }
 
-      state.lastTour = Date.now()
-      state.recent = boards.map((b) => b.node)
-      save()
+      recordTour(boards, sharedList, feelings.join('；'))
+
       const msg = `逛了 ${boards.length} 个榜（${boards.map((b) => b.node).join('、')}），分享给你 ${shared} 条${remembered ? `，记了 ${remembered} 件事` : ''}`
       api.log?.info?.('热榜巡游：' + msg)
       return { ok: true, message: msg, boards: boards.map((b) => b.node), shared, remembered }
@@ -149,21 +170,34 @@ export function createBrowse({ api, fetcher, memory, ownerQQ, think, sendText, n
     }
   }
 
-  /** 挑这次逛哪些榜：优先没最近逛过的，取前 count 个；o 可带 { nodes, count } 覆盖 */
-  async function pick(o = {}) {
-    const c = cfg()
-    const all = (Array.isArray(c.nodes) && c.nodes.length ? c.nodes : []).filter(Boolean)
+  /**
+   * 每轮必做的两件收尾（照 bili 的规矩：看过的都记成ta的经历）：
+   * ① 巡游历史落盘（面板「记录」区翻得到）；② 写一条经历进记忆库——
+   * 不依赖模型给不给 remember 字段，只要真逛了就写。
+   */
+  function recordTour(boards, sharedList, feeling) {
+    const at = Date.now()
+    state.lastTour = at
+    state.recent = boards.map((b) => b.node)
+    state.history = [
+      { at, boards: boards.map((b) => b.node), tops: boards.map((b) => ({ node: b.node, titles: b.items.slice(0, 5).map((x) => x.title) })), shared: sharedList, feeling: String(feeling || '').slice(0, 300) },
+      ...(state.history || []),
+    ].slice(0, 50)   // 只留最近 50 轮，别无限涨
+    save()
+    const summary = `热榜巡游：逛了${boards.map((b) => b.node).join('、')}，看到的热点有${boards.flatMap((b) => b.items.slice(0, 3).map((x) => x.title)).slice(0, 6).join('、')}${feeling ? `。我的感受：${feeling}` : ''}`
+    memory?.add?.({ text: summary.slice(0, 400), importance: 0.45, tags: ['热榜', '巡游'], source: 'tophub' })
+  }
+
+  /** 候选榜顺序：优先没最近逛过的，再排逛过的兜底；多备 3 个替补（2 个替补不够顶 60s 接口抽风） */
+  async function pickCandidates(prefer, count) {
+    const all = (Array.isArray(prefer) && prefer.length ? prefer : []).filter(Boolean)
     const names = all.length ? all : fetcher.nodes().map((x) => x.name)
     const freshOnes = names.filter((n) => !state.recent.includes(n))
-    const order = [...freshOnes, ...names.filter((n) => !freshOnes.includes(n))]
-    const count = Math.max(1, Number(o.count || c.nodesPerTour) || 2)
-    const out = []
-    for (const n of order.slice(0, count + 2)) {   // 多备两个，第一个挂了还有替补
-      if (out.length >= count) break
-      out.push(n)
-    }
-    return out
+    return [...freshOnes, ...names.filter((n) => !freshOnes.includes(n))].slice(0, count + 3)
   }
+
+  /** 巡游历史（面板「记录」区用） */
+  function history() { return state.history || [] }
 
   /** 面板 /state 用 */
   function status() {
@@ -173,5 +207,5 @@ export function createBrowse({ api, fetcher, memory, ownerQQ, think, sendText, n
     }
   }
 
-  return { tick, tour, status, slots }
+  return { tick, tour, status, history, slots }
 }
