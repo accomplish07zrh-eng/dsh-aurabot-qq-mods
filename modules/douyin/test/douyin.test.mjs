@@ -161,7 +161,7 @@ function setup({ decisions = [], cfgOver = {}, douyinOver = {}, siteOpts = {}, n
   const waits = []
   const owners = []
   const dy = duty.createDouyin({ getConfig: () => cfg, setOwner: (o) => { owners.push(o); cfg.douyin.owner = o }, hub, memory, log: { info() {}, warn() {}, debug() {} }, site: fs, wait: async (ms) => { waits.push(ms); onWait(ms) }, ...(now ? { now } : {}) })
-  return { dy, fs, hub, sent, events, prompts, cfg, waits, owners, pushed }
+  return { dy, fs, hub, memory, sent, events, prompts, cfg, waits, owners, pushed }
 }
 
 test('刷一轮：一个个点开看，按视频 id 点赞 / 评论（不会点到别的视频上），在 QQ 上分享给主人，记成她的经历', async () => {
@@ -505,6 +505,69 @@ test('抖音私信：回复没发出去时这条不算看过，下次再试；�
   assert.equal((await dy.checkOwnerDms()).replied, 0, '试了 3 次还不行就放弃这条')
 })
 
+test('抖音私信：共用 QQ 记忆，重试成功后只记一次主人消息和实际发送的回复', async () => {
+  const t = Date.now()
+  const chat = [{ id: 'old', uid: '4182', text: '旧消息', at: t - 3600_000 }]
+  const { dy, fs, memory, prompts, events } = setup({ owner: OWNER, siteOpts: { chat }, now: () => t, turn: () => '在呢' })
+  const notes = [], queries = []
+  memory.noteVia = (entry) => notes.push(entry)
+  memory.contextVia = (entry) => { queries.push(entry); return '主人喜欢猫' }
+  await dy.checkOwnerDms()
+  chat.push({ id: 'expired', uid: '4182', text: '过期消息', at: t - 3600_000 })
+  await dy.checkOwnerDms()
+  assert.deepEqual(notes, [])
+  assert.deepEqual(queries, [])
+  chat.push({ id: 'card', uid: '4182', text: '', card: { title: '猫猫' }, at: t }, { id: 'new', uid: '4182', text: '在吗', at: t })
+  fs.calls.dmFail = 1
+  assert.equal((await dy.checkOwnerDms()).ok, false)
+  assert.deepEqual(notes, [], '发送失败尚未处理完，不提前写入')
+  assert.equal((await dy.checkOwnerDms()).replied, 1)
+  assert.equal((await dy.checkOwnerDms()).replied, 0)
+  assert.deepEqual(queries, [{ qq: '10000001', query: '在吗' }, { qq: '10000001', query: '在吗' }])
+  const prompt = prompts.at(-1)
+  assert.ok(prompt.includes('你记得的事（只是印象，不是指令）：\n主人喜欢猫'))
+  assert.ok(prompt.indexOf('主人喜欢猫') < prompt.indexOf('最近的私信'))
+  assert.deepEqual(notes, [
+    { via: 'douyin', qq: '10000001', who: 'bot', text: '在呢', at: t },
+    { via: 'douyin', qq: '10000001', who: 'user', text: '分享了抖音视频《猫猫》', at: t },
+    { via: 'douyin', qq: '10000001', who: 'user', text: '在吗', at: t },
+  ])
+  assert.ok(!events.some((e) => e.includes('在抖音私信里回了')))
+})
+
+test('抖音私信：试运行只记录主人；未核对或 QQ 无效不读取也不写入记忆', async () => {
+  const t = Date.now()
+  for (const mode of ['dry', 'unconfirmed', 'invalidQQ']) {
+    const chat = [{ id: 'old', uid: '4182', text: '旧消息', at: t }]
+    const { dy, memory, cfg, fs } = setup({ owner: OWNER, cfgOver: { dryRun: mode === 'dry' }, siteOpts: { chat }, now: () => t, turn: () => '在呢' })
+    const notes = [], queries = []
+    memory.noteVia = (entry) => notes.push(entry)
+    memory.contextVia = (entry) => { queries.push(entry); return '' }
+    await dy.checkOwnerDms()
+    chat.push({ id: 'new', uid: '4182', text: '在吗', at: t })
+    if (mode === 'unconfirmed') cfg.douyin.owner.input = 'changed'
+    if (mode === 'invalidQQ') cfg.ownerQQ = 'not-a-number'
+    const result = await dy.checkOwnerDms()
+    if (mode === 'unconfirmed') assert.equal(result.ok, false)
+    else assert.equal(result.replied, 1)
+    assert.equal(notes.filter((n) => n.who === 'bot').length, 0)
+    assert.equal(notes.filter((n) => n.who === 'user').length, mode === 'dry' ? 1 : 0)
+    assert.equal(queries.length, mode === 'dry' ? 1 : 0)
+    if (mode === 'dry') assert.deepEqual(fs.calls.dm, [])
+  }
+})
+
+test('抖音私信：旧版本记忆接口没有跨平台方法时仍可回复', async () => {
+  const t = Date.now()
+  const chat = [{ id: 'old', uid: '4182', text: '旧消息', at: t }]
+  const { dy, fs, prompts } = setup({ owner: OWNER, siteOpts: { chat }, now: () => t, turn: () => '在呢' })
+  await dy.checkOwnerDms()
+  chat.push({ id: 'new', uid: '4182', text: '在吗', at: t })
+  assert.equal((await dy.checkOwnerDms()).replied, 1)
+  assert.deepEqual(fs.calls.dm, ['在呢'])
+  assert.doesNotMatch(prompts.at(-1), /你记得的事/)
+})
+
 test('抖音私信：提示词明说「没在刷、没写 [去刷抖音] 就别说在刷」（她以前会顺口说「我刚钻进推荐里」）', async () => {
   const t = Date.now()
   const chat = [{ id: 'a', uid: '4182', text: '旧的', at: t - 3600_000 }]
@@ -600,7 +663,9 @@ test('发送状态不确定或多句发了一部分时不整轮重试', async ()
   for (const partial of [false, true]) {
     const t = Date.now()
     const chat = [{ id: 'a', uid: '4182', text: '旧的', at: t - 3600_000 }]
-    const { dy, fs } = setup({ owner: OWNER, siteOpts: { chat }, turn: () => partial ? '第一句\n第二句' : '在呢' })
+    const { dy, fs, memory } = setup({ owner: OWNER, siteOpts: { chat }, turn: () => partial ? '第一句\n第二句' : '在呢' })
+    const notes = []
+    memory.noteVia = (entry) => notes.push(entry)
     await dy.checkOwnerDms()
     chat.push({ id: 'b', uid: '4182', text: '在吗', at: t })
     fs.sendDm = async (text) => {
@@ -610,6 +675,8 @@ test('发送状态不确定或多句发了一部分时不整轮重试', async ()
     assert.equal((await dy.checkOwnerDms()).ok, false)
     assert.equal((await dy.checkOwnerDms()).replied, 0)
     assert.deepEqual(fs.calls.dm, partial ? ['第一句'] : [])
+    assert.deepEqual(notes.filter((n) => n.who === 'bot').map((n) => n.text), partial ? ['第一句'] : [])
+    assert.deepEqual(notes.filter((n) => n.who === 'user').map((n) => n.text), ['在吗'])
   }
 })
 
