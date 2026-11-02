@@ -105,6 +105,19 @@ return function Panel({ settings, save, toast }) {
     toast(serial ? '已选设备：' + serial : '已改为自动选第一台设备')
   })
 
+  // ---- 远程设备（隧道，B2-2）：输入 ip:port → adb connect → 刷新设备下拉 ----
+  const [remoteAddr, setRemoteAddr] = useState('')
+  const connectRemote = lock('connectremote', async () => {
+    const serial = remoteAddr.trim()
+    if (!/^[\d.]+:\d+$/.test(serial)) return toast('地址要是 ip:port 形态，如 100.64.0.5:39051')
+    toast('正在 adb connect ' + serial + ' …')
+    const r = await call('/adb/connect', { serial })
+    if (!r.ok) return toast((r.error || r.message || '连接失败') + '（adb server 重启后设备会掉线，重连一次即可）')
+    toast('已连接：' + serial, 'ok')
+    const dv = await call('/adb/devices')
+    if (dv.ok) setDevices(dv.devices)
+  })
+
   // ---- 决策模型：参考系统菜单模型页的「按聊天选模型」，存 'provider::model'，空 = 跟随全局 ----
   const [models, setModels] = useState(null)
   useEffect(() => { call('/models').then((r) => setModels(r.list || [])).catch(() => setModels([])) }, [])
@@ -361,6 +374,7 @@ return function Panel({ settings, save, toast }) {
       ? h('div', { className: 'ab-small ab-muted', style: { marginBottom: 8 } }, '状态加载中…')
       : h('div', { style: { marginBottom: 12 } },
         stRow('设备', st.device || '未知'),
+        stRow('远程设备（隧道）', st.remote ? '是（ip:port，经 Tailscale/SSH 隧道）' : '否'),
         stRow('会话', st.session && st.session.owner ? '被 ' + st.session.owner + ' 占用' : '空闲'),
         stRow('流程', (st.flows || 0) + ' 个'),
         stRow('待确认', (st.confirms || 0) + ' 条写操作'),
@@ -437,6 +451,55 @@ return function Panel({ settings, save, toast }) {
           btn('检测设备', detectDevices, 'detect'))),
       devices && devices.length ? h('div', { className: 'ab-small ab-muted', style: { marginTop: 6 } },
         '共 ' + devices.length + ' 台：' + devices.map((x) => x.serial + (x.state === 'device' ? '' : '（' + x.state + '）')).join('、')) : null),
+
+    // ===== ②¾ 服务器部署 · 远程设备（B2-2）：Tailscale/SSH 隧道连手机，输入 ip:port 即连 =====
+    h(ui.Card, { title: '服务器部署 · 远程设备', desc: '机器人部署在服务器（Linux 无桌面）时，手机不用插线：经 Tailscale 或 SSH 隧道把手机暴露成 ip:port，在这里输入并连接；模块会按 ip:port 网络序列号直接操作（adb 原生支持，功能与 USB 完全一致）。连接后到上面的「设备」下拉选它。拓扑怎么搭看下面「服务器部署」教程。' },
+      h(ui.Row, { label: '连接远程设备', hint: '手机经隧道的 ip:port，如 100.64.0.5:39051 或 127.0.0.1:5555' },
+        h('div', { className: 'ab-flex', style: { gap: 8, width: '100%' } },
+          h('input', { className: 'ab-input', style: { flex: '1 1 200px', fontFamily: 'monospace' }, placeholder: 'ip:port', value: remoteAddr, onChange: (e) => setRemoteAddr(e.target.value) }),
+          btn('🔗 连接', connectRemote, 'connectremote'))),
+      h('div', { className: 'ab-note', style: { marginTop: 8 } },
+        h('div', { className: 'ab-small ab-muted', style: { lineHeight: 1.7 } },
+          '· 每次用手机功能前模块会自动重连一次（adb server 重启掉线自动恢复），连不上时重按「连接」。'
+          + '· 安全红线：5555/无线调试端口绝不暴露公网，只走 Tailscale 内网或 SSH 隧道。'))),
+
+    // ===== ②⅚ 服务器部署教程（B2-3，折叠卡）：拓扑选型 + 拓扑 A/B 分步指引 + 安全红线 =====
+    h('details', { style: { margin: '0 0 12px', border: '1px solid var(--ab-line)', borderRadius: 8, padding: '8px 12px' } },
+      h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '📖 服务器部署教程：远端手机怎么连（Tailscale / SSH 隧道）'),
+      h('div', { className: 'ab-small', style: { marginTop: 10, lineHeight: 1.8 } },
+        h('p', { className: 'ab-muted', style: { margin: '0 0 8px' } },
+          '机器人部署在 Linux 服务器（无桌面）时，手机不用插线，也不用装桌面——只要让手机对服务器呈现为一个 ip:port 的 adb 网络设备即可。整体拓扑：'),
+        h('pre', { style: { fontFamily: 'monospace', fontSize: 12, background: 'var(--ab-bg, rgba(127,127,127,.08))', padding: '8px 10px', borderRadius: 6, margin: '0 0 12px', whiteSpace: 'pre', overflowX: 'auto' } },
+          '手机 (Android)\n' +
+          '  ├─[拓扑A] Tailscale + 无线调试 ──tailnet 加密隧道──┐\n' +
+          '  └─[拓扑B] 家里电脑同网 + adb tcpip                │\n' +
+          '                    └─ ssh -L 隧道（借道家里电脑）──┤\n' +
+          '                                                    ▼\n' +
+          '                 服务器 (Linux, 无桌面, platform-tools)\n' +
+          '                   adb connect <手机IP>:<端口>')),
+        // 拓扑 A（推荐）
+        h('b', null, '拓扑 A（推荐）：手机装 Tailscale，自己进内网'),
+        h('ol', { style: { margin: '4px 0 12px', paddingLeft: 20 } },
+          h('li', null, '手机装 Tailscale（Google Play / 应用商店 / 官网 APK），登录你的 tailnet。'),
+          h('li', null, '手机开「无线调试」：设置 → 开发者选项 → 无线调试 → 打开。', h('span', { style: { color: '#c47a4a', fontWeight: 600 } }, 'Android 11+ 的端口是随机的（如 39051），每次开关都可能变——进无线调试页面把当前 IP:端口抄下来填进上面「连接远程设备」。')),
+          h('li', null, '在服务器上 `adb connect <手机tailscale IP>:<端口>`（或用上面卡片输入连接）；连接成功后在「设备」下拉选它。'),
+          h('li', null, '首次连接手机会弹「允许 USB 调试（网络）」授权框，勾「一律允许」点允许。'),
+          h('li', null, '优点：不依赖家里电脑开机；流量全程走 tailnet 加密，端口不出公网。手机要常亮充着电（熄屏省电策略可能断连），或在开发者选项开「充电时屏幕不休眠」。')),
+        // 拓扑 B（备选）
+        h('b', null, '拓扑 B（备选）：SSH 隧道借道家里电脑'),
+        h('ol', { style: { margin: '4px 0 12px', paddingLeft: 20 } },
+          h('li', null, '手机与家里电脑同一局域网，家里电脑开着 SSH 服务（Windows 可装 OpenSSH Server）。'),
+          h('li', null, '手机先用 USB 连一次家里电脑，执行 `adb tcpip 5555` 切到网络模式（只需一次；拔线前手机与电脑须保持 adb 连接）。'),
+          h('li', null, '在服务器上建隧道：`ssh -N -L 5555:<手机局域网IP>:5555 用户@家里电脑`（建议配 systemd/计划任务常驻）。'),
+          h('li', null, '服务器上 `adb connect 127.0.0.1:5555`；模块侧无感，设备列表里就是 127.0.0.1:5555。'),
+          h('li', null, '适合不方便在手机装 Tailscale 的情况；要求家里电脑开机在线。')),
+        // 安全红线
+        h('b', null, '安全红线（务必遵守）'),
+        h('ul', { style: { margin: '4px 0', paddingLeft: 20, color: '#e5484d' } },
+          h('li', null, '5555/无线调试端口绝不暴露到公网：adb 网络模式无鉴权，公网可达等于把手机送人。'),
+          h('li', null, '只走 Tailscale 内网（tailnet）或 SSH 隧道两种路径，不要「路由器端口转发 + DDNS」。'),
+          h('li', null, 'Tailscale 建议配 ACL，只放行「服务器 ↔ 手机」两台设备，别的设备不许访问手机端口。'),
+          h('li', null, '公共 Wi-Fi 下打开「无线调试」有风险（同网设备可扫描 adb 端口），用完随手关。')))),
 
     // ===== ②½ 手机开 ADB 调试与首次授权指引（第一次连手机的照着走）=====
     h(ui.Card, { title: '手机 ADB 调试与首次授权指引', desc: '第一次让模块碰手机？照下面的步骤把手机的 ADB 调试打开并完成首次授权（用模拟器的可以跳过 1~3 步，模拟器一般自带已开好的 adb）。' },

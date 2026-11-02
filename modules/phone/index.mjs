@@ -6,6 +6,7 @@
 import { createAdb } from './lib/adb.mjs'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createSession } from './lib/session.mjs'
@@ -17,11 +18,12 @@ import { createGuides } from './lib/guides.mjs'
 import { runWorkspace, cronMatch } from './lib/workspace.mjs'
 
 const BUSY_WAIT_MS = 120000 // 工具触发时忙等上限：超过则改报「已在后台排队」
+const execFileP = promisify(execFile)
 
 export default {
   id: 'phone',
   name: '手机逛逛',
-  version: '0.1.0',
+  version: '0.2.0',
   api: 1,
   description: '通过 ADB 逛 Android 手机：按主人教好的流程自动签到/浏览/点赞，或自由推理完成一句话任务。',
   panel: 'panel.js',
@@ -103,10 +105,26 @@ export default {
       }
       return env
     }
+    // ---- 远程设备（隧道，B2-2）----
+    // adb 网络序列号（ip:port）形态：经 Tailscale/SSH 隧道连的手机。
+    // adb 原生支持 `-s <ip>:<port>`，协议侧零改动；这里只做两件小事：
+    // ① getAdb() 返回前幂等 `adb connect <serial>` 一次（已连接时 adb 秒回）——
+    //    解决 adb server 重启后设备掉线、后续命令报「device not found」；
+    // ② 面板「服务器部署 · 远程设备」卡片经 /adb/connect 主动发起连接。
+    const NET_SERIAL = /^[\d.]+:\d+$/
+    /** 幂等执行一次 `adb connect <serial>`（connect 是 server 级命令，不带 -s）。失败抛错。 */
+    async function adbConnect(adbPath, serial) {
+      return await execFileP(adbPath, ['connect', serial], { timeout: 10000, windowsHide: true })
+    }
     async function getAdb() {
       const env = await ensureReady()
       if (!env.adbPath) throw new Error('没有可用的 adb：请配置 adbPath 或允许自动安装')
       const s = getSettings()
+      // 网络序列号：先幂等 connect 一次。连不上不阻断——让后续命令自然报出可读错误（设备也可能本来就在）
+      if (NET_SERIAL.test(s.deviceSerial)) {
+        try { await (testHooks.adbConnect || adbConnect)(env.adbPath, s.deviceSerial) }
+        catch (e) { api.log.warn(`[phone] 远程设备 connect 失败（继续尝试使用）：${e.message}`) }
+      }
       return (testHooks.createAdb || createAdb)({ adbPath: env.adbPath, serial: s.deviceSerial, timeoutMs: 10000 })
     }
 
@@ -667,6 +685,24 @@ export default {
         return json({ ok: false, error: '打开选择框失败：' + msg })
       }
     })
+    // ---- 远程设备连接（B2-2，面板「服务器部署 · 远程设备」卡片用）----
+    // 输入 ip:port → 幂等 `adb connect` → 顺带返回最新设备列表（面板直接刷新下拉，复用 /adb/devices 的解析逻辑）
+    api.route('/adb/connect', async (req) => {
+      if (req.method !== 'POST') return json({ ok: false, error: '只支持 POST' })
+      const body = await api.core.http.body(req).catch(() => ({}))
+      const serial = String(body.serial || '').trim()
+      // 严格网络序列号校验：只放行 ip:port（防把任意参数塞进 adb 命令行）
+      if (!NET_SERIAL.test(serial)) return json({ ok: false, error: `serial 要是 ip:port 形态（如 100.64.0.5:39051），拿到：${serial.slice(0, 60)}` })
+      try {
+        const env = await ensureReady()
+        if (!env.adbPath) throw new Error('没有可用的 adb：请先在面板选择或自动安装')
+        const r = await (testHooks.adbConnect || adbConnect)(env.adbPath, serial)
+        const out = String(r.stdout || '').trim().replace(/\r?\n/g, ' ')
+        // adb connect 的成功/失败都走 stdout（如 "connected to" / "cannot connect to"），按前缀判断
+        const connected = /connected to/i.test(out)
+        return json({ ok: connected, message: out || 'adb connect 无输出', serial })
+      } catch (e) { return json({ ok: false, error: e.message }) }
+    })
     api.route('/adb/devices', async () => {
       try {
         const adb = await rawAdb()
@@ -814,6 +850,7 @@ export default {
       return json({
         device,
         enabled: getSettings().enabled,
+        remote: NET_SERIAL.test(String(getSettings().deviceSerial || '')), // 当前 serial 是网络序列号（隧道来的远程设备）
         auto: (() => { const a = autoStats(); return a.day === dayKey() ? { runs: a.runs, lastRun: a.lastRun } : { runs: 0, lastRun: 0 } })(),
         session: session.status(),
         adbSource: adbCache?.source || 'not-ready',
