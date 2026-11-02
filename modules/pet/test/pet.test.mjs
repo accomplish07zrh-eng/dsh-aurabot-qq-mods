@@ -88,14 +88,18 @@ function startModule({ settings = {}, hooks } = {}) {
   const exports = mod.setup(api) ?? {}
   const token = readFileSync(api.dataDir('host-token'), 'utf8').trim()
 
-  function req(path, { method = 'GET', query = {}, token: tk = token, json, headers = {} } = {}) {
+  function req(path, { method = 'GET', query = {}, token: tk = token, json, headers = {}, socket } = {}) {
     const qs = new URLSearchParams(query).toString()
-    return {
+    const r = {
       method,
       url: `${path}${qs ? '?' + qs : ''}`,
       headers: { host: '127.0.0.1:53210', ...(tk ? { 'x-pet-token': tk } : {}), ...(json ? { 'content-type': 'application/json' } : {}), ...headers },
       __json: json,
     }
+    // 模拟真实连接的来源地址。不传 = 进程内直调（socket 缺省，模块按本机处理）。
+    // 传 '203.0.113.9' 这类地址 = 模拟从外网直连进来；传 '127.0.0.1' = 模拟本机/反代接入。
+    if (socket) r.socket = { remoteAddress: socket }
+    return r
   }
   async function call(path, opts = {}) {
     const handler = routes.get(path.split('?')[0])
@@ -671,6 +675,40 @@ test('Electron 镜像可配：electronMirror 同时作用于 zip 直装 URL 与 
   const env = startModule({ settings: { electronMirror: 'https://example.com/em/' }, hooks: { spawn, npmCli: fakeCli, fetchZip: async () => ({ ok: false, status: 502 }) } })
   await env.exports.electronInstall()
   assert.equal(calls[0].env.ELECTRON_MIRROR, 'https://example.com/em/', 'npm 安装也走同一个镜像')
+})
+
+test('安全：明文 http 的下载地址一律拒绝（只放行本机回环），防止中间人换包', async () => {
+  // 配一个明文镜像 → 连 fetchZip 都不该被调用就直接失败。
+  // 走 ensureDefaultPack（素材包下载入口）而不是 electronInstall：后者会先检查客户端是否已生成，
+  // 那道前置检查会先返回，测不到下载闸。
+  let fetched = ''
+  const env = startModule({
+    settings: { petPackUrl: 'http://evil.example.com/pet.zip' },
+    hooks: {
+      fetchZip: async (url) => { fetched = url; return { ok: true, arrayBuffer: async () => new ArrayBuffer(0) } },
+    },
+  })
+  const r = await env.exports.ensureDefaultPack(true)
+  assert.equal(r.ok, false, '明文素材包地址必须拒绝')
+  assert.equal(fetched, '', '明文地址根本不该发起请求（先拦后下）')
+  assert.match(String(r.message || ''), /明文|https/i, '错误信息说明要 https')
+})
+
+test('安全：下载内容超过大小上限直接拒绝，不落盘不执行', async () => {
+  const env = startModule({
+    settings: { petPackUrl: 'https://example.com/pet.zip' },
+    hooks: {
+      // 声称长度超过上限（模拟被塞了超大响应）
+      fetchZip: async () => ({
+        ok: true,
+        headers: { get: () => String(600 * 1024 * 1024) }, // 600MB > 512MB 上限
+        arrayBuffer: async () => new ArrayBuffer(0),
+      }),
+    },
+  })
+  const r = await env.exports.ensureDefaultPack(true)
+  assert.equal(r.ok, false, '超大响应必须失败')
+  assert.match(String(r.message || ''), /过大|上限/i, '错误信息说明是大小问题')
 })
 
 /**
@@ -1644,19 +1682,65 @@ test('安全：显式配置 publicBaseUrl 时，已鉴权的伪造 X-Forwarded �
 })
 
 test('安全：明文 http 的跨机访问默认阻断；显式 allowInsecureRemote 才放行', async () => {
-  // 默认：配了 http:// 的对外地址 + 非回环 Host + 合法 token → 必须在 Host 闸之后被明文闸挡住
+  // 默认：配了 http:// 的对外地址 + 真正的跨机来源（socket 非回环）+ 合法 token → 被明文闸挡住。
+  // 【安全审查 P1-2】判定看 socket，不看 Host 头——旧实现只认 Host 头，远端发 Host:127.0.0.1 即可绕过。
   const env = startModule({ settings: { publicBaseUrl: 'http://bot.example.com' } })
-  const st = await env.call('/status', { headers: { host: '127.0.0.1:53210' } })
-  assert.equal(st.status, 200, '回环请求照常放行')
+  const st = await env.call('/status') // 进程内直调 = 本机
+  assert.equal(st.status, 200, '本机请求照常放行')
   assert.equal(st.json.publicBaseInsecure, true, 'status 报明文风险，面板据此提示')
   assert.equal(st.json.allowInsecureRemote, false, '默认不允许明文跨机')
-  const r = await env.call('/status', { headers: { host: 'bot.example.com' } })
+  const r = await env.call('/status', { socket: '203.0.113.9', headers: { host: 'bot.example.com' } })
   assert.equal(r.status, 403, '明文 http 跨机默认拒绝')
   assert.ok(/明文|https/i.test(String(r.json?.message || '')), '错误信息要说清楚要用 https')
+  // Host 头伪造：把 Host 写成回环确实能骗过「Host 闸」，但骗不过「明文闸」——
+  // 明文闸现在按 socket 判来源，所以真正的跨机来源仍会被挡住。
+  const spoofed = await env.call('/status', { socket: '203.0.113.9', headers: { host: '127.0.0.1:53210' } })
+  assert.equal(spoofed.status, 403, '伪造回环 Host 不能绕过明文阻断（P1-2 回归：判定看 socket 不看 Host）')
+  // 但换一个真的跨机 socket + 对外 Host，明文闸照样拦
+  const cross = await env.call('/status', { socket: '198.51.100.7', headers: { host: 'bot.example.com' } })
+  assert.equal(cross.status, 403, '跨机来源 + 对外 Host 必被明文闸拦')
   // 显式放行后能过（只建议内网自测）
   const env2 = startModule({ settings: { publicBaseUrl: 'http://bot.example.com', allowInsecureRemote: true } })
-  const r2 = await env2.call('/status', { headers: { host: 'bot.example.com' } })
+  const r2 = await env2.call('/status', { socket: '203.0.113.9', headers: { host: 'bot.example.com' } })
   assert.equal(r2.status, 200, 'allowInsecureRemote 打开后放行')
+})
+
+test('安全：直连伪造 X-Forwarded-For 不能冒充本机，也不能绕过限速（P1-1 回归）', async () => {
+  // 旧实现取 XFF 第一跳：攻击者每次换假 XFF 就能绕过封禁，也能伪造受害者 IP 让其被封（DoS）。
+  // 新口径：socket 非回环 → 转发头一律不看。
+  const env = startModule({ settings: { publicBaseUrl: 'https://bot.example.com' } })
+  const ip = '203.0.113.9'
+  const send = (extra) => env.call('/status', { socket: ip, headers: { host: 'bot.example.com', ...extra } })
+  // 每次都换一个假的 XFF 首跳，真实来源 socket 不变 → 仍然会被累计封禁
+  let first429At = 0
+  for (let i = 1; i <= 25; i++) {
+    const r = await send({ 'x-pet-token': 'f'.repeat(48), 'x-forwarded-for': `10.0.0.${i}` })
+    if (r.status === 429) { first429At = i; break }
+  }
+  assert.equal(first429At, 21, '换假 XFF 首跳绕不过限速（按 socket 计数）')
+  // 直连伪造 XFF:127.0.0.1 也不能把自己当本机从而免于明文阻断
+  const env2 = startModule({ settings: { publicBaseUrl: 'http://bot.example.com' } })
+  const bypass = await env2.call('/status', { socket: ip, headers: { host: 'bot.example.com', 'x-forwarded-for': '127.0.0.1' } })
+  assert.equal(bypass.status, 403, '直连伪造 XFF 本机地址照样被明文闸拦住')
+})
+
+test('安全：只有可信反向代理的最后一跳才算真实来源（P1-1 回归）', async () => {
+  // 反代场景：socket 是反代自己（回环），真实来源在 XFF 最后一跳。
+  // 必须显式配 trustedProxy 才采信；未配置时一律按回环处理。
+  // (a) 未配 trustedProxy：XFF 完全不被采信 → 按本机处理
+  const noProxy = startModule({ settings: { publicBaseUrl: 'http://bot.example.com' } })
+  const direct = await noProxy.call('/status', { socket: '127.0.0.1', headers: { host: 'bot.example.com', 'x-forwarded-for': '203.0.113.9' } })
+  assert.equal(direct.status, 200, '未配 trustedProxy 时不采信 XFF，按本机放行')
+  // (b) 配了 trustedProxy：socket 命中 → 采信 XFF 最后一跳，这时候是跨机 → 明文闸拦住
+  const proxied = startModule({ settings: { publicBaseUrl: 'http://bot.example.com', trustedProxy: '127.0.0.1' } })
+  const viaProxy = await proxied.call('/status', { socket: '127.0.0.1', headers: { host: 'bot.example.com', 'x-forwarded-for': '203.0.113.9' } })
+  assert.equal(viaProxy.status, 403, '可信反代 + 真实来源非本机 → 明文闸拦住')
+  // (c) 可信反代但末跳是回环 → 仍算本机
+  const viaProxyLocal = await proxied.call('/status', { socket: '127.0.0.1', headers: { host: '127.0.0.1:53210', 'x-forwarded-for': '127.0.0.1' } })
+  assert.equal(viaProxyLocal.status, 200, '可信反代 + 末跳回环 → 算本机')
+  // (d) socket 不是可信反代 → 即使带 XFF 也不采信
+  const notProxy = await proxied.call('/status', { socket: '198.51.100.7', headers: { host: 'bot.example.com', 'x-forwarded-for': '127.0.0.1' } })
+  assert.equal(notProxy.status, 403, 'socket 不在 trustedProxy 里 → XFF 不被采信（仍按 socket 判跨机）')
 })
 
 test('安全：令牌轮换后旧令牌立即失效，新令牌可用', async () => {
@@ -1682,19 +1766,19 @@ test('安全：令牌连续失败触发按 IP 限速封禁（公网防暴力猜�
   const env = startModule({ settings: { publicBaseUrl: 'https://bot.example.com' } })
   // 阈值 20 次：前 20 次 401，第 21 次起该 IP 被封禁（429），不再继续比对令牌
   const ip = '203.0.113.9'
-  const send = (headers) => env.call('/status', { headers: { host: 'bot.example.com', ...headers } })
+  const send = (headers, socket = ip) => env.call('/status', { socket, headers: { host: 'bot.example.com', ...headers } })
   let first429At = 0
   for (let i = 1; i <= 25; i++) {
-    const r = await send({ 'x-pet-token': 'f'.repeat(48), 'x-forwarded-for': ip })
+    const r = await send({ 'x-pet-token': 'f'.repeat(48) })
     if (r.status === 429) { first429At = i; break }
     assert.equal(r.status, 401, `第 ${i} 次错误令牌应仍是 401`)
   }
   assert.equal(first429At, 21, '第 21 次起触发封禁（阈值 20 次失败）')
   // 封禁期间即使令牌正确也拒绝（封禁先于比对）
-  const blocked = await send({ 'x-pet-token': env.token, 'x-forwarded-for': ip })
+  const blocked = await send({ 'x-pet-token': env.token })
   assert.equal(blocked.status, 429, '封禁期间该 IP 一律拒绝')
   // 换一个来源 IP 不受影响（限速按 IP 隔离，不能误伤别人）
-  const other = await send({ 'x-pet-token': env.token, 'x-forwarded-for': '198.51.100.7' })
+  const other = await send({ 'x-pet-token': env.token }, '198.51.100.7')
   assert.equal(other.status, 200, '其它 IP 不受影响')
 })
 
