@@ -117,6 +117,18 @@ export function checkModule(mod, known) {
     if (e.isFile() && !ROOT_FILES.test(e.name)) warnings.push(`${e.name} 建议放进 lib/ 或 assets/，模块根目录只留入口和说明`)
     if (e.isDirectory() && !ROOT_DIRS.has(e.name) && !/^[._]/.test(e.name) && e.name !== 'node_modules' && e.name !== 'pet-client') warnings.push(`文件夹 ${e.name}/ 建议归到 lib/、assets/、docs/ 或 test/`)
   }
+  // 自定义面板 panel.js：插件是用 new Function(body) 跑它的（整文件即函数体，含顶层 return），
+  // 所以入口的 import 检查覆盖不到它。这里按同一种方式解析一遍——括号/引号错位当场就红，
+  // 不用等用户打开面板才看见「Unexpected token ')'」（phone 0.2.0 就这么漏过一版）。
+  const panelFile = join(mod.dir, 'panel.js')
+  if (existsSync(panelFile)) {
+    const source = readFileSync(panelFile, 'utf8')
+    try {
+      new Function(source) // eslint-disable-line no-new-func
+    } catch (error) {
+      errors.push(`panel.js 语法错误（面板会加载失败：${error.message}）`)
+    }
+  }
   const pkg = existsSync(join(mod.dir, 'package.json')) ? JSON.parse(readFileSync(join(mod.dir, 'package.json'), 'utf8')) : null
   if (Object.keys(pkg?.dependencies || {}).length && !m.build) errors.push('有 npm 依赖的模块必须配 build 打成独立运行包：用户机器上不跑 npm install')
   if (m.build && !pkg?.scripts?.build) errors.push('配了 build，package.json 里要有 scripts.build')
