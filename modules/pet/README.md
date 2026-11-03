@@ -33,20 +33,29 @@
 ### 安全须知（务必读）
 
 - **必须用 https。** 明文 `http://` 的跨机访问**默认被直接阻断**（令牌与气泡内容在公网明文传输等于送人）。反向代理上请配置 TLS；仅内网自测才考虑打开 `allowInsecureRemote`。
-- **面板接口默认只允许本机访问。** `/aurabot/api/panel/*` 是管理接口（能改配置、能下客户端包），公网上裸奔等于把管理权交出去。要用远端管理必须显式开 `ext.panelRemoteAccess`，**并且**在反向代理层再加一道认证（Basic Auth / OAuth 等）。
-- **反代只放行下面这些精确路径**给桌宠客户端用，其余一律 404。
+- **面板接口默认只允许本机访问。** `/aurabot/api/panel/*` 是管理接口（能改配置、能下客户端包），公网上裸奔等于把管理权交出去。要用远端管理必须显式开 `security.panelRemoteAccess`（面板「安全防护」页），**并且**在反向代理层再加一道认证（Basic Auth / OAuth 等）。
+- **反代只放行桌宠客户端实际调用的精确路径**，其余一律 404。
 
   ⚠ 注意路径：`pet` 属于核心的稳定路由（前缀为空），所以**没有** `/ext/pet/` 这一段——
-  按 `/aurabot/api/ext/pet/*` 配 nginx 会全部 404。真实路径（`src/core/modules.js` 的 `STABLE_ROUTES`）：
+  按 `/aurabot/api/ext/pet/*` 配 nginx 会全部 404。全部走 `x-pet-token`（素材走 query 参数 `token`），
+  最小可用集合（不配客户端起不来）：
 
-  | 路径 | 用途 |
-  | --- | --- |
-  | `/aurabot/api/events` | 长轮询收事件（关闭响应缓冲） |
-  | `/aurabot/api/status` | 客户端拉状态 |
-  | `/aurabot/api/config` | 客户端拉配置 |
-  | `/aurabot/api/asset/*` | 素材动画 webm |
+  | 路径 | 方法 | 用途 |
+  | --- | --- | --- |
+  | `/aurabot/api/events` | GET | 长轮询收事件（关闭响应缓冲，`proxy_read_timeout ≥ 60s`） |
+  | `/aurabot/api/config` | GET | 拉配置与形象包视图 |
+  | `/aurabot/api/asset/*` | GET | 素材动画 webm |
 
-  其余客户端接口（`/playback`、`/bubble`、`/chat*` 等）都走 `x-pet-token`，需要的话按需逐条加，
+  按需追加（对应客户端功能，不用该功能可以不放行）：
+
+  | 路径 | 方法 | 用途 |
+  | --- | --- | --- |
+  | `/aurabot/api/playback` | POST | 动画播放回执 |
+  | `/aurabot/api/whisper` | POST | 碎碎念（主动搭话） |
+  | `/aurabot/api/focus` | POST | 右键菜单切专注模式 |
+  | `/aurabot/api/chat`、`/chat/history`、`/chat/state` | POST/GET | 对话框（聊天、历史、状态回执） |
+  | `/aurabot/api/behavior`、`/behavior/env`、`/behavior/reaction`、`/behavior/icon/act` | POST | 行为大脑（下发、桌面窗口上报、反应回执、图标动作） |
+
   **不要图省事写 `/aurabot/api/*`**：那样会把 `douyin` / `heybox` / `group-admin` / `tophub` 等
   **没有 token** 的模块路由一起暴露到公网。
 

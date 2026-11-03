@@ -1018,7 +1018,32 @@ export default {
         if (m) ver = m[0]
       } catch {} // package.json 读不到就用兜底版本
       const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
-      return { ver, url: `${electronMirror()}${ver}/electron-v${ver}-${platform}-${process.arch}.zip` }
+      const file = `electron-v${ver}-${platform}-${process.arch}.zip`
+      return { ver, platform, arch: process.arch, file, url: `${electronMirror()}${ver}/${file}` }
+    }
+
+    // 【安全审查 P1 闭环】Electron zip 的 sha256 校验：zip 从镜像下，但校验清单**优先从 GitHub 官方**拉
+    // （防「镜像被整体篡改，zip 和 SHASUMS 一起换」）；官方不可达（国内网络常见）再降级用镜像自己的
+    // SHASUMS，并打警告。两处都拿不到 → 中止安装（宁可装不上，不装一个没验过签的运行时）。
+    async function electronSha256({ ver, platform, arch, file }) {
+      const sources = [
+        { url: `https://github.com/electron/electron/releases/download/v${ver}/SHASUMS256.txt`, tag: '官方' },
+        { url: `${electronMirror()}${ver}/SHASUMS256.txt`, tag: '镜像' },
+      ]
+      let lastError = null
+      for (const { url, tag } of sources) {
+        try {
+          const buf = await fetchZipTo(url, join(appDir(), `SHASUMS256.${tag}.txt`), { maxBytes: 1024 * 1024 })
+          const text = buf.toString('utf8')
+          const line = text.split(/\r?\n/).find((l) => l.trim().endsWith(file))
+          if (!line) throw new Error(`清单里没有 ${file}（版本/平台对不上？）`)
+          const sha = line.trim().split(/\s+/)[0]
+          if (!/^[a-f0-9]{64}$/i.test(sha)) throw new Error('清单里的 sha256 格式不对')
+          if (tag === '镜像') api.log.warn(`Electron 校验清单来自镜像（官方 GitHub 拉取失败：${lastError ? String(lastError.message || lastError).slice(0, 120) : '未知原因'}），完整性保证降级`)
+          return sha
+        } catch (error) { lastError = error }
+      }
+      throw new Error(`官方与镜像的 SHASUMS256.txt 都没拿到（${String(lastError?.message || lastError).slice(0, 160)}）`)
     }
 
     // 纯 JS zip 解压（支持存储/deflate 两种压缩法；带 zip-slip 防护；unix 上恢复可执行位）
@@ -1332,7 +1357,8 @@ export default {
     }
 
     async function electronInstallZip(exe) {
-      const { ver, url } = electronZipUrl()
+      const meta = electronZipUrl()
+      const { ver, url, file } = meta
       const zipFile = join(appDir(), 'electron.zip')
       const pkgRoot = join(appDir(), 'node_modules', 'electron')
       const stage = join(pkgRoot, '.unzip')
@@ -1341,7 +1367,9 @@ export default {
       const fsx = rawFs()
       const rmRaw = fsx?.rmSync ? fsx.rmSync.bind(fsx) : rmSync
       try {
-        const zip = await fetchZipTo(url, zipFile)
+        // 【安全审查 P1 闭环】先拿校验清单再下 zip：sha256 对不上就直接拒绝安装
+        const expectSha = await electronSha256(meta)
+        const zip = await fetchZipTo(url, zipFile, { sha256: expectSha })
         // 能走到这里说明 pkgRoot 里本来就没有可用安装：清空重装。顺手清掉旧版本留下的垃圾
         // （旧版把扁平 zip 直接解到 pkgRoot，留下 electron.exe + 一百多 MB 散文件）和 npm 的半成品。
         try { rmRaw(pkgRoot, { recursive: true, force: true }) } catch (error) {

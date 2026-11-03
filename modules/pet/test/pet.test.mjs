@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { deflateRawSync } from 'node:zlib'
+import { createHash } from 'node:crypto'
 
 let mod
 const OWNER = '10000001'
@@ -579,6 +580,27 @@ function fakeSpawn({ exit = 0, makeExe } = {}) {
   return { spawn, calls }
 }
 
+/**
+ * 给 Electron 安装的 fetchZip 注入套上「SHASUMS256.txt 分发」：
+ * 旧测试只认 zip 请求；现在 electronInstallZip 会先拉 SHASUMS256.txt（官方→镜像）。
+ * 这个包装按 URL 分发：SHASUMS 请求返回「用真实 zip 内容算出的 sha256 清单」
+ * （所以 sha256 校验天然通过），zip 请求原样走旧注入。
+ */
+function withElectronSums(fetchZip) {
+  const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+  const zipName = `electron-v45.1.0-${plat}-${process.arch}.zip`
+  return async (url) => {
+    if (!/SHASUMS256/.test(String(url))) return fetchZip(url)
+    // 先向旧注入要 zip 内容来算 hash（zip 与清单在测试里同源，天然匹配）
+    const res = await fetchZip(url)
+    const buf = Buffer.from(await res.arrayBuffer())
+    const sha = createHash('sha256').update(buf).digest('hex')
+    const text = `${sha}  ${zipName}\n`
+    const out = Buffer.from(text, 'utf8')
+    return { ok: true, arrayBuffer: async () => out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) }
+  }
+}
+
 test('Electron 安装：走 node + npm-cli.js（不经 shell）、注入 ELECTRON_MIRROR 镜像；已装则跳过', async () => {
   const env = startModule()
   const appDir = env.api.dataDir('app')
@@ -643,7 +665,7 @@ test('Electron 安装：npm 失败但 zip 直装成功 → 整体 ok:true，并�
     hooks: {
       spawn: fakeSpawn({ exit: 1 }).spawn, // npm 必失败
       npmCli: fakeCli,
-      fetchZip: async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) }),
+      fetchZip: withElectronSums(async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) })),
     },
   })
   const r = await env.exports.electronInstall()
@@ -654,19 +676,33 @@ test('Electron 安装：npm 失败但 zip 直装成功 → 整体 ok:true，并�
 })
 
 test('Electron 镜像可配：electronMirror 同时作用于 zip 直装 URL 与 npm 的 ELECTRON_MIRROR（末尾自动补 /）', async () => {
-  // ① zip 直装：没有 npm-cli 时用配置的镜像拼版本路径
-  let requestedUrl = ''
+  // ① zip 直装：没有 npm-cli 时用配置的镜像拼版本路径。
+  //    现在安装前还会拉 SHASUMS256.txt（官方 → 镜像）：官方注入 502、镜像注入成功（返回合法清单），
+  //    这样校验能过、zip 也会继续请求——两个 URL 都能断言落在配置的镜像上。
+  const requestedUrls = []
+  const FAKE_SHA = 'f'.repeat(64)
   const zipped = startModule({
     settings: { electronMirror: 'https://example.com/em' }, // 故意不写结尾斜杠
     hooks: {
       npmCli: '',
-      fetchZip: async (url) => { requestedUrl = url; return { ok: false, status: 502 } },
+      fetchZip: async (url) => {
+        requestedUrls.push(url)
+        if (/SHASUMS256/.test(url)) {
+          if (/github\.com/.test(url)) return { ok: false, status: 502 } // 官方挂 → 降级镜像清单
+          const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+          const text = `${FAKE_SHA}  electron-v45.1.0-${plat}-${process.arch}.zip\n`
+          return { ok: true, arrayBuffer: async () => Buffer.from(text, 'utf8') }
+        }
+        return { ok: false, status: 502 } // zip 本身还是给失败，这个测试只看 URL
+      },
     },
   })
   await zipped.exports.download()
   const zr = await zipped.exports.electronInstall()
   assert.equal(zr.ok, false, '下载失败（注入的 502）')
-  assert.match(requestedUrl, /^https:\/\/example\.com\/em\/\d+\.\d+\.\d+\/electron-v/, '用面板配的镜像，且自动补了斜杠')
+  assert.ok(requestedUrls.some((u) => /^https:\/\/example\.com\/em\/\d+\.\d+\.\d+\/electron-v/.test(u)), '用面板配的镜像拼 zip URL，且自动补了斜杠')
+  assert.ok(requestedUrls.some((u) => /^https:\/\/example\.com\/em\/\d+\.\d+\.\d+\/SHASUMS256\.txt$/.test(u)), '镜像 SHASUMS256.txt 也走同一镜像')
+  assert.ok(requestedUrls.some((u) => /github\.com\/electron\/electron\/releases/.test(u)), '官方 SHASUMS 优先尝试（镜像整体被篡改时兜得住）')
 
   // ② npm 路径：ELECTRON_MIRROR 环境变量同源
   const fakeCli = join(process.env.AURABOT_DATA_DIR, 'npm-cli.js')
@@ -778,14 +814,14 @@ test('Electron 兜底直装：没有 npm-cli（DSH 运行时/裸机）→ 镜像
   let requestedUrl = ''
   const fakeZip = tinyZip(officialZipEntries())
   // 换一个带 hooks 的实例（hooks 在 setup 时读）；npmCli: '' = 强制没有 npm（逼出 zip 直装路径），
-  // fetchZip 钩子替代真下载，不打真网络。
+  // fetchZip 钩子替代真下载，不打真网络。SHASUMS 分发由 withElectronSums 包一层。
   const env2 = startModule({
     hooks: {
       npmCli: '',
-      fetchZip: async (url) => {
+      fetchZip: withElectronSums(async (url) => {
         requestedUrl = url
         return { ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) }
-      },
+      }),
     },
   })
   const r = await env2.exports.electronInstall()
@@ -815,7 +851,7 @@ test('Electron 兜底直装：镜像 zip 外面套了一层目录（electron-v45
   const env2 = startModule({
     hooks: {
       npmCli: '',
-      fetchZip: async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) }),
+      fetchZip: withElectronSums(async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) })),
     },
   })
   const r = await env2.exports.electronInstall()
@@ -835,7 +871,7 @@ test('zip 解压：Unix 普通文件不因权限位被误判成符号链接（0o
   const env2 = startModule({
     hooks: {
       npmCli: '',
-      fetchZip: async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) }),
+      fetchZip: withElectronSums(async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) })),
     },
   })
   const r = await env2.exports.electronInstall()
@@ -868,7 +904,7 @@ test('Electron 宿主 asar 补丁：解压/清理必须走 original-fs，否则�
     hooks: {
       npmCli: '',
       fsRaw,
-      fetchZip: async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) }),
+      fetchZip: withElectronSums(async () => ({ ok: true, arrayBuffer: async () => fakeZip.buffer.slice(fakeZip.byteOffset, fakeZip.byteOffset + fakeZip.byteLength) })),
     },
   })
   const r = await env2.exports.electronInstall()
@@ -891,7 +927,9 @@ test('Electron 兜底直装失败：镜像给的不是 zip（HTML 错误页/断�
   const env2 = startModule({
     hooks: {
       npmCli: '',
-      fetchZip: async () => ({ ok: true, arrayBuffer: async () => html.buffer.slice(html.byteOffset, html.byteOffset + html.byteLength) }),
+      // SHASUMS 由 withElectronSums 用同一份 HTML 的 hash 生成（模拟「镜像把 zip 和清单一起给」），
+      // 于是 sha256 校验通过、在解压时暴露「根本不是 zip」
+      fetchZip: withElectronSums(async () => ({ ok: true, arrayBuffer: async () => html.buffer.slice(html.byteOffset, html.byteOffset + html.byteLength) })),
     },
   })
   const r = await env2.exports.electronInstall()
@@ -908,6 +946,26 @@ test('Electron 兜底直装失败：下载炸了 → ok:false 带原因（不再
   assert.match(r.message, /zip 直装失败/)
   assert.match(r.message, /ECONNREFUSED/)
   assert.doesNotMatch(r.message, /找不到 npm-cli\.js/, '报错不再是一条死路提示')
+})
+
+test('安全：SHASUMS256 官方与镜像都拿不到 → 中止安装，绝不装没验过签的运行时', async () => {
+  // 下载注入：SHASUMS 请求一律 404（官方 + 镜像都拉不到清单），zip 请求不会被走到
+  const zipRequested = []
+  const env = startModule({
+    hooks: {
+      npmCli: '',
+      fetchZip: async (url) => {
+        if (/SHASUMS256/.test(String(url))) return { ok: false, status: 404 }
+        zipRequested.push(url)
+        return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) }
+      },
+    },
+  })
+  await env.exports.download()
+  const r = await env.exports.electronInstall()
+  assert.equal(r.ok, false, '清单拿不到必须中止')
+  assert.match(String(r.message || ''), /SHASUMS256|校验清单/, '错误信息说明是校验清单的问题')
+  assert.equal(zipRequested.length, 0, '清单没拿到就绝不能开始下 zip')
 })
 
 test('启动桌宠：分离进程 + 清 ELECTRON_RUN_AS_NODE；心跳活着提示已在跑；stop 杀记录的 pid', async () => {
