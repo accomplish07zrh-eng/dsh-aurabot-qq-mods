@@ -968,6 +968,36 @@ test('安全：SHASUMS256 官方与镜像都拿不到 → 中止安装，绝不�
   assert.equal(zipRequested.length, 0, '清单没拿到就绝不能开始下 zip')
 })
 
+test('安全：zip 与 SHASUMS256 校验不符 → 拒绝安装且不落盘（复审 2 补：sha 失配回归）', async () => {
+  // 模拟「镜像上 zip 被换了包，但清单是真的」：清单返回官方真 hash，zip 给的是别的内容。
+  // sha256 对不上必须在解压/落盘前被拦。
+  const fakeZip = tinyZip(officialZipEntries())
+  const REAL_SHA = createHash('sha256').update(fakeZip).digest('hex')
+  const zipRequested = []
+  const env = startModule({
+    hooks: {
+      npmCli: '',
+      fetchZip: async (url) => {
+        if (/SHASUMS256/.test(String(url))) {
+          const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+          const text = `${REAL_SHA}  electron-v45.1.0-${plat}-${process.arch}.zip\n`
+          const out = Buffer.from(text, 'utf8')
+          return { ok: true, arrayBuffer: async () => out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) }
+        }
+        zipRequested.push(url)
+        // 「被换过的包」：内容与清单不符
+        return { ok: true, arrayBuffer: async () => Buffer.from('TAMPERED PAYLOAD').buffer.slice(0, 17) }
+      },
+    },
+  })
+  await env.exports.download()
+  const exe = join(env.api.dataDir('app'), 'node_modules', 'electron', ELECTRON_REL)
+  const r = await env.exports.electronInstall()
+  assert.equal(r.ok, false, 'sha 失配必须拒绝安装')
+  assert.match(String(r.message || ''), /sha256|篡改/i, '错误信息说明是完整性校验失败')
+  assert.ok(!existsSync(exe), '被换的包绝不落地成 electron 运行时')
+})
+
 test('启动桌宠：分离进程 + 清 ELECTRON_RUN_AS_NODE；心跳活着提示已在跑；stop 杀记录的 pid', async () => {
   const killed = []
   const { spawn, calls } = fakeSpawn()
