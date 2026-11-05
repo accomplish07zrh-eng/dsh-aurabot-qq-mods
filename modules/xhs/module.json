@@ -1,0 +1,23 @@
+{
+  "id": "xhs",
+  "name": "看小红书",
+  "version": "0.6.1",
+  "description": "默认基础模式：粘个 cookie 就能读正文和配图。搜索/评论/点赞/发帖要本机搭一座开源桥（面板里有部署说明），自动刷帖可选。",
+  "category": "platform",
+  "tags": [
+    "小红书",
+    "搜索",
+    "评论",
+    "点赞"
+  ],
+  "author": "yuccc7878",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "network",
+    "filesystem"
+  ],
+  "homepage": "https://github.com/aureth-labs/dsh-aurabot-qq-mods"
+}
