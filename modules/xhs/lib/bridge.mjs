@@ -73,6 +73,29 @@ export function createBridge(getBase, getToken = () => '') {
       return r
     },
 
+    /** 传一张图，拿 file_id（发布用） */
+    async upload({ filename, mime, dataBase64 }) {
+      const r = await call(base(), '/upload', {
+        method: 'POST',
+        body: { filename, mime, data_base64: dataBase64 },
+        timeout: 120000,
+        token: tk(),
+      })
+      if (!r.ok) throw new Error(r.message || '图片上传失败')
+      return r
+    },
+
+    /** 发一篇图文笔记 */
+    async publish({ title, content, fileIds, topics = [], private: isPrivate = false }) {
+      const r = await call(base(), '/publish', {
+        method: 'POST',
+        body: { title, content, file_ids: fileIds, topics, private: isPrivate },
+        timeout: 180000,
+        token: tk(),
+      })
+      return r
+    },
+
     /** 发评论 / 楼中楼 */
     async postComment({ noteId, content, replyCommentId = null, atUserId = null }) {
       const r = await call(base(), '/comment', {

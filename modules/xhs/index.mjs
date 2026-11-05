@@ -2,13 +2,14 @@
 // 签名请求（搜索/评论）交给宿主机上的 Python 桥（xhs_bridge.py，默认 127.0.0.1:8099）；
 // 读单条笔记不用桥，页面 SSR 加 cookie 就够，图落盘再发。
 import fs from 'node:fs'
+import path from 'node:path'
 import { createBridge } from './lib/bridge.mjs'
 import { readNote, cacheImage, pickLink, parseIds, buildUrl } from './lib/read.mjs'
 
 export default {
   id: 'xhs',
   name: '看小红书',
-  version: '0.6.0',
+  version: '0.6.1',
   api: 1,
   description: '搜笔记、看帖子、读评论、回评论；靠本地桥做签名请求',
   panel: 'panel.js',
@@ -31,20 +32,42 @@ export default {
     dailyComments: 10,
     riskCooldownMin: 10,
     fullMode: false,
+    autoBrowse: false,
+    autoIntervalMin: 180,
+    autoKeywords: '',
+    autoPerRun: 1,
+    autoDailyNotes: 10,
+    autoRunsPerDay: 8,
+    autoHours: '9-23',
+    autoLike: false,
+    autoDailyLikes: 5,
+    autoReply: false,
+    autoNotify: false,
+    allowPublish: false,
+    dailyPosts: 3,
+    postGapMin: 10,
+    publishPrivate: true,
   },
   settings: [
-    { key: 'cookie', label: '小红书 cookie', type: 'textarea', hint: '手动粘贴：整串 cookie 粘进来（a=1; b=2; …）。只认这一份，不读文件' },
-    { key: 'enableRead', label: '允许读笔记', type: 'switch', hint: '关掉后链接也打不开' },
-    { key: 'groupRead', label: '群里也能看', type: 'switch', hint: '默认关：只有主人私聊能看。群友让她看会消耗桥的额度' },
-    { key: 'sendImages', label: '顺便发配图', type: 'switch' },
-    { key: 'sendImagesInGroup', label: '群里也发配图', type: 'switch', hint: '默认关，避免在群里刷图' },
-    { key: 'maxImages', label: '最多发几张', type: 'number', min: 0, max: 9, step: 1 },
-    { key: 'imageGapMs', label: '配图间隔(毫秒)', type: 'number', min: 0, max: 5000, step: 100, hint: '连发多张之间的停顿，太小容易被网关限流' },
-    { key: 'maxDescChars', label: '正文最多读多少字', type: 'number', min: 200, max: 6000, step: 100, hint: '太长会截断，省 token' },
-    { key: 'maxResults', label: '搜索返回几条', type: 'number', min: 1, max: 20, step: 1 },
-    { key: 'cooldownSec', label: '两条评论间隔(秒)', type: 'number', min: 0, max: 3600, step: 10 },
-    { key: 'dailyComments', label: '每天最多回几条', type: 'number', min: 0, max: 200, step: 1, hint: '0 = 不限。按自然日算，落盘，重启不清零' },
-    { key: 'riskCooldownMin', label: '风控冷却(分钟)', type: 'number', min: 1, max: 1440, step: 1, hint: '撞到验证码/429 后暂停多久' },
+    // 基础功能：粘个 cookie 就能用，不需要桥
+    { key: 'cookie', label: '基础 · 小红书 cookie', type: 'textarea', hint: '手动粘贴：整串 cookie 粘进来（a=1; b=2; …）。只认这一份，不读文件' },
+    { key: 'maxImages', label: '基础 · 读笔记最多发几张图', type: 'number', min: 0, max: 9, step: 1, hint: '0 = 只发正文不发图' },
+    { key: 'imageGapMs', label: '基础 · 配图间隔(毫秒)', type: 'number', min: 0, max: 5000, step: 100, hint: '连发多张之间的停顿，太小容易被网关限流' },
+    { key: 'maxDescChars', label: '基础 · 正文最多读多少字', type: 'number', min: 200, max: 6000, step: 100, hint: '太长会截断，省 token' },
+    // 完整功能：都要桥
+    { key: 'maxResults', label: '搜索 · 一次返回几条', type: 'number', min: 1, max: 20, step: 1, hint: '太多占上下文' },
+    { key: 'cooldownSec', label: '回帖 · 两条间隔(秒)', type: 'number', min: 0, max: 3600, step: 10, hint: '两次回帖之间至少隔多久；0 = 不限制（不建议）' },
+    { key: 'dailyComments', label: '回帖 · 每天最多几条', type: 'number', min: 0, max: 200, step: 1, hint: '0 = 不限。按自然日算，落盘，重启不清零' },
+    { key: 'riskCooldownMin', label: '风控 · 冷却(分钟)', type: 'number', min: 1, max: 1440, step: 1, hint: '撞到验证码/429 后暂停多久' },
+    { key: 'autoIntervalMin', label: '自动刷帖 · 间隔(分钟)', type: 'number', min: 30, max: 1440, step: 30, hint: '两轮之间至少隔多久；实际会在 0.8–1.3 倍之间随机浮动' },
+    { key: 'autoKeywords', label: '自动刷帖 · 关键词', type: 'text', hint: '逗号分隔，轮着搜；留空用内置的宽泛词' },
+    { key: 'autoPerRun', label: '自动刷帖 · 每轮几篇', type: 'number', min: 1, max: 3, step: 1, hint: '1–3 篇' },
+    { key: 'autoDailyNotes', label: '自动刷帖 · 每天最多几篇', type: 'number', min: 1, max: 50, step: 1, hint: '到上限当天就不再刷，第二天自动重置' },
+    { key: 'autoRunsPerDay', label: '自动刷帖 · 每天最多几轮', type: 'number', min: 1, max: 24, step: 1, hint: '和「每天最多几篇」同时生效，谁先到就停' },
+    { key: 'autoHours', label: '自动刷帖 · 活跃时段', type: 'text', hint: '格式 9-23，只在这个小时区间里刷' },
+    { key: 'autoDailyLikes', label: '自动刷帖 · 每天最多几个赞', type: 'number', min: 0, max: 50, step: 1, hint: '0 = 不点赞' },
+    { key: 'dailyPosts', label: '发帖 · 每天最多几条', type: 'number', min: 1, max: 10, step: 1, hint: '和「两条间隔」同时生效' },
+    { key: 'postGapMin', label: '发帖 · 两条间隔(分钟)', type: 'number', min: 1, max: 1440, step: 1, hint: '两篇之间至少隔多久' },
   ],
 
   setup(api) {
@@ -56,9 +79,16 @@ export default {
     )
     // 桥在不在：没桥时搜索/评论这些工具不挂出来，只留「读笔记」（读笔记走页面 SSR + cookie）
     let bridgeOk = null
+    let bridgeFeatures = null
     async function probeBridge() {
-      try { await bridge.health({ timeoutMs: 5000 }); bridgeOk = true }
-      catch { bridgeOk = false }
+      try {
+        const h = await bridge.health({ timeoutMs: 5000 })
+        bridgeOk = true
+        bridgeFeatures = Array.isArray(h.features) ? h.features : null
+      } catch {
+        bridgeOk = false
+        bridgeFeatures = null
+      }
       return bridgeOk
     }
     probeBridge()
@@ -95,6 +125,169 @@ export default {
         markRisk(Number(settings().riskCooldownMin ?? 10) || 10, msg)
       }
     }
+
+    // ---------- 自动刷帖：定时搜、定时看，按开关决定点不点赞、回不回 ----------
+    const AUTO_WORDS = ['治愈', '咖啡', '读书']
+    function autoSnapshot() {
+      const st = readState()
+      const day = today()
+      return {
+        st,
+        notes: st.autoDay === day ? Number(st.autoNotes) || 0 : 0,
+        likes: st.autoDay === day ? Number(st.autoLikes) || 0 : 0,
+        runs: st.autoDay === day ? Number(st.autoRuns) || 0 : 0,
+        lastRunAt: Number(st.autoLastRunAt) || 0,
+        nextDueAt: Number(st.autoNextDueAt) || 0,
+        paused: st.autoPauseDay === day,
+        pausedWhy: st.autoPauseDay === day ? String(st.autoPauseWhy || '') : '',
+        seen: Array.isArray(st.seenNotes) ? st.seenNotes : [],
+      }
+    }
+    function autoPause(reason) {
+      saveState({ autoPauseDay: today(), autoPauseWhy: String(reason || '').slice(0, 120) })
+      log.warn('小红书自动刷帖今天停了：' + reason)
+    }
+    function inAutoHours(hours) {
+      const m = String(hours || '9-23').match(/^(\d{1,2})\s*[-~]\s*(\d{1,2})$/)
+      if (!m) return true
+      const from = Number(m[1])
+      const to = Number(m[2])
+      const h = new Date().getHours()
+      return from <= to ? (h >= from && h <= to) : (h >= from || h <= to)
+    }
+    function cleanComment(text) {
+      const first = String(text || '').split('\n').map((x) => x.trim()).filter(Boolean)[0] || ''
+      const t = first.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').replace(/\s+/g, ' ').trim()
+      return t.length > 120 ? t.slice(0, 120) : t
+    }
+    async function autoComment(note, text) {
+      const s = settings()
+      const risk = riskMinutesLeft()
+      if (risk) return { ok: false, message: '还在风控冷却' }
+      const st = readState()
+      if (Date.now() - (Number(st.lastCommentAt) || 0) < Number(s.cooldownSec ?? 60) * 1000) return { ok: false, message: '评论冷却中' }
+      const daily = Number(s.dailyComments ?? 10)
+      const used = quotaUsed()
+      if (daily > 0 && used >= daily) return { ok: false, message: '今日回帖额度用完' }
+      try {
+        const r = await bridge.postComment({ noteId: note.id, content: text, replyCommentId: null, atUserId: null })
+        saveState({ lastCommentAt: Date.now(), day: today(), count: used + 1 })
+        log.info(`自动回了一条：note=${note.id} ${text.slice(0, 30)}`)
+        return { ok: true, id: r.comment_id || '' }
+      } catch (e) {
+        noteRisk(e)
+        return { ok: false, message: e.message }
+      }
+    }
+
+    let autoRunning = false
+    async function autoRound({ force = false } = {}) {
+      const s = settings()
+      if (s.fullMode !== true || s.autoBrowse !== true) return { ok: false, message: '自动刷帖没开（要完整功能 + 自动刷帖开关）' }
+      if (bridgeOk === false) return { ok: false, message: '桥没起' }
+      if (riskMinutesLeft()) return { ok: false, message: '风控冷却中' }
+      const a = autoSnapshot()
+      if (a.paused) return { ok: false, message: '今天先停了：' + (a.pausedWhy || '风控') }
+      if (!inAutoHours(s.autoHours)) return { ok: false, message: '不在活跃时段' }
+      const cap = Number(s.autoDailyNotes ?? 10) || 10
+      if (a.notes >= cap) return { ok: false, message: `今天已经刷了 ${a.notes} 篇，到上限了` }
+      const runCap = Number(s.autoRunsPerDay ?? 8) || 8
+      if (a.runs >= runCap) return { ok: false, message: `今天已经跑了 ${a.runs} 轮，到上限了` }
+      if (!force && a.nextDueAt && Date.now() < a.nextDueAt) return { ok: false, message: '还没到下一轮' }
+      if (autoRunning) return { ok: false, message: '上一轮还在跑' }
+      autoRunning = true
+      try {
+        const words = String(s.autoKeywords || '').split(/[,，\s]+/).filter(Boolean)
+        const list = words.length ? words : AUTO_WORDS
+        const kw = list[a.notes % list.length]
+        let items = []
+        try {
+          items = (await bridge.search(kw, 1)) || []
+        } catch (e) {
+          noteRisk(e)
+          autoPause('搜索失败：' + e.message)
+          return { ok: false, message: '搜索失败：' + e.message }
+        }
+        const seen = new Set(a.seen)
+        const pick = items.filter((x) => x && x.id && !seen.has(x.id)).slice(0, Math.max(1, Number(s.autoPerRun ?? 1) || 1))
+        if (!pick.length) {
+          saveState({ autoLastRunAt: Date.now() })
+          return { ok: true, message: `「${kw}」没刷到新笔记` }
+        }
+        let notes = a.notes
+        let likes = a.likes
+        let liked = 0
+        let replied = 0
+        for (const it of pick) {
+          let detail = null
+          try {
+            detail = await readNote(it.id, readCookie(), it.token, { maxChars: Number(s.maxDescChars ?? 1200) })
+          } catch { /* 没正文就只用标题 */ }
+          if (s.autoLike !== false && likes < (Number(s.autoDailyLikes ?? 5) || 0)) {
+            try { await bridge.like(it.id, 'like'); likes++; liked++ } catch (e) { noteRisk(e); if (/verifytype|风控|429|频繁|验证/.test(e.message)) autoPause('点赞被拦：' + e.message) }
+          }
+          if (s.autoReply === true && (typeof api.think === 'function' || typeof api.ask === 'function')) {
+            try {
+              const body = detail ? String(detail.note?.desc || '') : ''
+              const brief = `标题：${it.title || ''}\n作者：${it.author || ''}\n${body ? '正文：' + body.slice(0, 400) : '（只拿到标题，没读到正文）'}`
+              let gen = ''
+              if (typeof api.think === 'function') {
+                // 带人格和记忆，用她自己的口气；不想说就回 SKIP
+                gen = await api.think(
+                  `你刷到一条小红书笔记：\n${brief}\n\n用你平时的口气写一条 15–40 字的评论，别客套、别彩虹屁、不提 AI、不劝关注、不引战。不想说就只回 SKIP。`,
+                  { title: '刷小红书', timeoutMs: 90_000 },
+                )
+              } else {
+                gen = await api.ask({
+                  system: '你在小红书刷到一条笔记，写一句像真人的短评论：15–40 字，口语，别客套别彩虹屁，不提 AI，不劝关注，不引战。只输出评论本身。',
+                  text: brief,
+                  maxTokens: 120,
+                })
+              }
+              const text = cleanComment(gen)
+              if (text && !/^skip$/i.test(text) && !/^skip[。.!！]?$/i.test(text)) {
+                if ((await autoComment({ id: it.id }, text)).ok) {
+                  replied++
+                  try {
+                    api.use('memory')?.addEvent?.({ text: `我在小红书回了一条评论：${text.slice(0, 40)}`, tags: ['小红书'], importance: 0.4 })
+                  } catch { /* 记不上不影响 */ }
+                }
+              }
+            } catch (e) { log.warn('自动回复失败：' + e.message) }
+          }
+          seen.add(it.id)
+          notes++
+        }
+        const gapMs = Math.max(30, Number(s.autoIntervalMin ?? 180) || 180) * 60000
+        const nextDueAt = Date.now() + Math.round(gapMs * (0.8 + Math.random() * 0.5))
+        saveState({
+          autoLastRunAt: Date.now(),
+          autoNextDueAt: nextDueAt,
+          autoDay: today(),
+          autoNotes: notes,
+          autoLikes: likes,
+          autoRuns: a.runs + 1,
+          seenNotes: [...seen].slice(-300),
+        })
+        try {
+          api.use('memory')?.addEvent?.({ text: `刷小红书看到《${pick[0].title || '一篇笔记'}》`, tags: ['小红书'], importance: 0.2 })
+        } catch { /* 记不上不影响 */ }
+        const bits = [`刷了 ${pick.length} 篇`]
+        if (liked) bits.push(`点了 ${liked} 个赞`)
+        if (replied) bits.push(`回了 ${replied} 条`)
+        log.info('自动刷帖：' + bits.join('，'))
+        if (s.autoNotify === true) {
+          const to = readState().ownerChatId
+          if (to) {
+            try { await api.send(to, '小红书刷了一轮：' + bits.join('，')) } catch (e) { log.warn('刷帖汇总没发出去：' + e.message) }
+          }
+        }
+        return { ok: true, message: bits.join('，') }
+      } finally {
+        autoRunning = false
+      }
+    }
+    api.every(60_000, () => { autoRound().catch(() => {}) }, '小红书自动刷帖')
 
     // cookie 只有一份来源：面板里手动粘贴。不读文件、不自动抓
     function readCookieInfo() {
@@ -305,6 +498,9 @@ export default {
     // ---------- 工具 ----------
     api.tool(({ chat }) => {
       if (!chat || chat.kind === 'system') return []
+      if (chat.kind === 'private' && chat.chatId && api.isOwner(chat.userId) && readState().ownerChatId !== chat.chatId) {
+        saveState({ ownerChatId: chat.chatId })
+      }
       const s = settings()
       // 群里默认不给她看小红书：群友一句「去搜一下」就要烧桥的额度
       if (chat.kind === 'group' && s.groupRead !== true) return []
@@ -424,6 +620,7 @@ export default {
         ok: true,
         pluginVersion: api.version,
         bridge: bridgeInfo,
+        features: bridgeFeatures || [],
         bridgeUrl: String(s.bridgeUrl || 'http://127.0.0.1:8099'),
         cookie: Boolean(info.cookie),
         cookieSource: info.source,
@@ -434,6 +631,25 @@ export default {
         riskMinutes: riskMinutesLeft(),
         riskWhy: st.riskWhy || '',
         fullMode: s.fullMode === true,
+        auto: (() => {
+          const a = autoSnapshot()
+          const gap = Math.max(30, Number(s.autoIntervalMin ?? 180) || 180) * 60000
+          return {
+            on: s.autoBrowse === true,
+            reply: s.autoReply === true,
+            like: s.autoLike !== false,
+            notes: a.notes,
+            cap: Number(s.autoDailyNotes ?? 10) || 10,
+            likes: a.likes,
+            likeCap: Number(s.autoDailyLikes ?? 5) || 0,
+            runs: a.runs,
+            runsCap: Number(s.autoRunsPerDay ?? 8) || 8,
+            lastRunAt: a.lastRunAt,
+            nextRunAt: a.nextDueAt || (a.lastRunAt ? a.lastRunAt + gap : 0),
+            paused: a.paused,
+            pausedWhy: a.pausedWhy,
+          }
+        })(),
         flags: {
           fullMode: s.fullMode === true,
           enableSearch: s.enableSearch !== false,
@@ -469,6 +685,8 @@ export default {
       return { ok: true, message: '今天的评论额度清零了' }
     })
 
+    api.route('/auto/run', async () => autoRound({ force: true }))
+
     api.route('/bridge/test', async () => {
       try {
         const h = await bridge.health({ timeoutMs: 5000 })
@@ -489,6 +707,102 @@ export default {
       return { ok: true, cookie: Boolean(info.cookie), source: info.source, length: info.cookie.length }
     })
 
+    // ---------- 发帖：命令触发，先草稿再确认 ----------
+    const POST_MAX_IMAGES = 9
+    const POST_MAX_BYTES = 10 * 1024 * 1024
+    const POST_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36'
+
+    function postState() {
+      const st = readState()
+      const day = today()
+      return {
+        used: st.postDay === day ? Number(st.postCount) || 0 : 0,
+        lastAt: Number(st.lastPostAt) || 0,
+        draft: st.publishDraft || null,
+      }
+    }
+
+    function imageUrlsOf(msg) {
+      const out = []
+      for (const seg of (msg && msg.images) || []) {
+        const d = (seg && seg.data) || {}
+        const u = String(d.url || d.file || '').trim()
+        if (u) out.push(u)
+      }
+      return out.slice(0, POST_MAX_IMAGES)
+    }
+
+    async function downloadPostImage(url, idx) {
+      if (/^https?:\/\//i.test(url)) {
+        const r = await fetch(url, { headers: { 'user-agent': POST_UA }, signal: AbortSignal.timeout(25000) })
+        if (!r.ok) throw new Error('图片下载失败 HTTP ' + r.status)
+        const buf = Buffer.from(await r.arrayBuffer())
+        if (buf.length > POST_MAX_BYTES) throw new Error('图片超过 10MB')
+        const file = api.dataDir(`post-${Date.now()}-${idx}.jpg`)
+        fs.writeFileSync(file, buf)
+        return file
+      }
+      const file = String(url).replace(/^file:\/\//, '')
+      if (!fs.existsSync(file)) throw new Error('找不到图片：' + file)
+      if (fs.statSync(file).size > POST_MAX_BYTES) throw new Error('图片超过 10MB')
+      return file
+    }
+
+    function draftSummary(d) {
+      const lines = [
+        '草稿：',
+        `标题：${d.title}`,
+        `正文：${d.content.length > 80 ? d.content.slice(0, 80) + '…' : d.content}`,
+        `配图：${(d.images || []).length} 张`,
+      ]
+      if (d.topics && d.topics.length) lines.push('话题：' + d.topics.map((t) => '#' + t).join(' '))
+      lines.push('可见范围：' + (d.private !== false ? '仅自己可见' : '公开（撤不回）'))
+      lines.push('', '要发就回 /xhs 发，不发就 /xhs 取消。30 分钟内有效。')
+      return lines.join('\n')
+    }
+
+    async function doPublishDraft(draft) {
+      const s = settings()
+      if (bridgeFeatures && !bridgeFeatures.includes('publish')) return { ok: false, message: '桥不支持发帖，先更新桥' }
+      if (s.allowPublish !== true) return { ok: false, message: '发帖功能关着（设置里「允许发帖」）' }
+      const risk = riskMinutesLeft()
+      if (risk) return { ok: false, message: `小红书还在风控冷却里，再等 ${risk} 分钟` }
+      const q = postState()
+      const daily = Number(s.dailyPosts ?? 3) || 3
+      if (q.used >= daily) return { ok: false, message: `今天已经发了 ${q.used} 条，够了` }
+      const gap = Number(s.postGapMin ?? 10) * 60000
+      if (Date.now() - q.lastAt < gap) return { ok: false, message: `刚发过，隔 ${Math.ceil((q.lastAt + gap - Date.now()) / 60000)} 分钟再来` }
+      if (!(draft.images || []).length) return { ok: false, message: '图文笔记至少要一张图' }
+
+      const fileIds = []
+      for (let i = 0; i < draft.images.length; i++) {
+        const p = draft.images[i]
+        try {
+          const buf = fs.readFileSync(p)
+          const r = await bridge.upload({ filename: path.basename(p), mime: 'image/jpeg', dataBase64: buf.toString('base64') })
+          fileIds.push(r.file_id)
+        } catch (e) {
+          return { ok: false, message: `第 ${i + 1} 张图没传上去：${e.message}` }
+        }
+      }
+      const r = await bridge.publish({
+        title: draft.title,
+        content: draft.content,
+        fileIds,
+        topics: draft.topics || [],
+        private: draft.private !== false,
+      })
+      if (!r.ok) {
+        if (r.verifytype) markRisk(Number(settings().riskCooldownMin ?? 10) || 10, `发帖被拦 verifytype=${r.verifytype}`)
+        return { ok: false, message: r.verifytype ? `发帖被风控拦了（verifytype ${r.verifytype}）` : (r.toast || r.message || '发布失败') }
+      }
+      saveState({ postDay: today(), postCount: q.used + 1, lastPostAt: Date.now(), publishDraft: null })
+      try {
+        api.use('memory')?.addEvent?.({ text: `我在小红书发了一篇：${draft.title}`, tags: ['小红书'], importance: 0.5 })
+      } catch { /* 记不上不影响 */ }
+      return { ok: true, message: `发出去了（${r.toast || '成功'}）note_id=${r.note_id || '?'}${r.private ? '，仅自己可见' : ''}` }
+    }
+
     // ---------- 命令 ----------
     api.command({
       name: 'xhs',
@@ -496,7 +810,44 @@ export default {
       desc: '看小红书：/xhs 链接｜/xhs 关键词｜/xhs 健康',
       run: async (arg, msg) => {
         const a = String(arg || '').trim()
-        if (!a) return '用法：/xhs 链接 或 /xhs 关键词'
+        if (!a) return '用法：/xhs 链接｜/xhs 关键词｜/xhs 发帖 标题 | 正文（带图）｜/xhs 发｜/xhs 取消'
+        if (a === '取消') { saveState({ publishDraft: null }); return '草稿扔了' }
+        if (a === '草稿') { const d = postState().draft; return d ? draftSummary(d) : '现在没有草稿' }
+        if (a === '发' || a === '发布') {
+          const q = postState()
+          if (!q.draft) return '没有草稿，先 /xhs 发帖 标题 | 正文（带图）'
+          if (Date.now() - (Number(q.draft.at) || 0) > 30 * 60000) { saveState({ publishDraft: null }); return '草稿过期了，重新发一次' }
+          const r = await doPublishDraft(q.draft)
+          return r.message
+        }
+        if (a.startsWith('发帖')) {
+          if (!msg || !String(msg.chatId || '').startsWith('private:')) return '发帖只在私聊里用'
+          if (bridgeFeatures && !bridgeFeatures.includes('publish')) return '现在的桥还不支持发帖（/health 的 features 里没有 publish），先更新桥'
+          const rest = a.slice(2).trim()
+          const [titlePart, ...bodyParts] = rest.split(/[|｜]/)
+          const body = bodyParts.join('|').trim()
+          const title = (body ? titlePart : '').trim() || String(body || rest).split('\n')[0].slice(0, 20)
+          const content = (body || rest).trim()
+          if (!content) return '写点东西：/xhs 发帖 标题 | 正文，图片一起发过来'
+          const urls = imageUrlsOf(msg)
+          if (!urls.length) return '图文笔记至少要一张图，把图跟命令一起发过来'
+          const files = []
+          for (let i = 0; i < urls.length; i++) {
+            try { files.push(await downloadPostImage(urls[i], i)) } catch (e) { return `第 ${i + 1} 张图有问题：${e.message}` }
+          }
+          const topics = [...content.matchAll(/#([^\s#]{1,20})/g)].map((m) => m[1]).slice(0, 5)
+          const s0 = settings()
+          const draft = {
+            title: title.slice(0, 20),
+            content: content.slice(0, 1000),
+            images: files,
+            topics,
+            private: s0.publishPrivate !== false,
+            at: Date.now(),
+          }
+          saveState({ publishDraft: draft })
+          return draftSummary(draft)
+        }
         if (a === '健康' || a === 'health') {
           try {
             const h = await bridge.health()
