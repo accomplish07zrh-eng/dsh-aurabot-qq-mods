@@ -12,18 +12,31 @@ const CATALOG = [
   { kind: 'bed',    name: '床',          price: 150, hint: '深蓝毯子，枕头有点塌' },
   { kind: 'lamp',   name: '鲸鱼台灯',    price: 90,  hint: '尾巴当灯臂，灯泡有点旧了' },
   { kind: 'snacks', name: '一箱零食',    price: 30,  hint: '薯片、饼干、棒棒糖' },
-  { kind: 'frame',  name: '小鱼画',      price: 20,  hint: '墙上那幅' },
+  { kind: 'frame',  name: '小鱼画',      price: 20,  hint: '墙上那幅', mount: 'wall' },
   { kind: 'plant',  name: '盆栽',        price: 25,  hint: '窗台边的绿' },
+  // —— 后来添的 ——
+  { kind: 'shelf',   name: '书架',       price: 110, hint: '三格，塞满了没看完的书' },
+  { kind: 'fishtank',name: '小鱼缸',     price: 95,  hint: '缸里养了一条橙色的小鱼' },
+  { kind: 'mirror',  name: '落地镜',     price: 70,  hint: '出门前总要照一下' },
+  { kind: 'cushion', name: '抱枕堆',     price: 20,  hint: '三个，颜色都不一样' },
+  { kind: 'clock',   name: '挂钟',       price: 40,  hint: '走得不太准', mount: 'wall' },
+  { kind: 'lights',  name: '星星串灯',   price: 45,  hint: '挂了就不想关', mount: 'wall' },
+  { kind: 'tv',      name: '电视',       price: 160, hint: '挂墙的，屏幕里老是那条鱼', mount: 'wall' },
+  { kind: 'pc',      name: '电脑',       price: 200, hint: '显示器、主机、键盘，一整套' },
+  { kind: 'cooker',  name: '电饭煲',     price: 60,  hint: '一直保温着，随时有热饭' },
+  { kind: 'washer',  name: '洗衣机',     price: 170, hint: '滚筒的，转起来嗡嗡响' },
 ]
+
+const FISH = { kind: 'fish', name: '小鱼', x: 45, y: 88 }
 
 const DAY = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10)
 
 export default {
   id: 'room',
   name: '小鱼小屋',
-  version: '1.1.0',
+  version: '1.2.0',
   api: 1,
-  description: '属于她自己的房间：聊一句攒一点，攒够了买家具，面板里随便拖',
+  description: '属于她自己的房间：聊一句攒一点，攒够了买家具和装饰，面板里随便拖',
   defaults: { coinName: '鱼币', startCoins: 420, earnPerMessage: 1, earnPerDay: 60 },
   settings: [
     { key: 'coinName', label: '货币名字', type: 'text', hint: '默认「鱼币」' },
@@ -57,8 +70,11 @@ export default {
       if (!Array.isArray(d.items)) d.items = []
       if (!d.earn || typeof d.earn !== 'object') d.earn = { day: DAY(), got: 0 }
       if (d.earn.day !== DAY()) d.earn = { day: DAY(), got: 0 }
-      // 清掉目录里已经没有的物品
-      d.items = d.items.filter((i) => i && CATALOG.some((c) => c.kind === i.kind))
+      // 清掉目录里已经没有的物品（小鱼除外，她一直住这儿）
+      d.items = d.items.filter((i) => i && (i.kind === FISH.kind || CATALOG.some((c) => c.kind === i.kind)))
+      if (!d.items.some((i) => i.kind === FISH.kind)) {
+        d.items.push({ kind: FISH.kind, x: FISH.x, y: FISH.y, at: Date.now(), fixed: true })
+      }
       return d
     }
 
@@ -85,8 +101,10 @@ export default {
       const slot = CATALOG.findIndex((c) => c.kind === kind)
       const used = d.items.length
       const x = 22 + ((slot >= 0 ? slot : used) % 4) * 18
-      const y = 74 + (Math.floor((slot >= 0 ? slot : used) / 4) % 3) * 7
-      return { x: Math.min(88, x), y: Math.min(84, y) }
+      // 挂墙的东西（画/钟/串灯）贴墙，不放地上
+      const wall = (meta(kind) || {}).mount === 'wall'
+      const y = wall ? 20 + (slot % 3) * 6 : 74 + (Math.floor((slot >= 0 ? slot : used) / 4) % 3) * 7
+      return { x: Math.min(88, x), y: wall ? y : Math.min(84, y) }
     }
 
     function describe(d) {
@@ -108,6 +126,7 @@ export default {
 
     function buy(kind) {
       const d = load()
+      if (kind === FISH.kind) return { ok: false, message: '小鱼本来就在屋里，不用买' }
       const c = meta(kind)
       const st = settings()
       if (!c) return { ok: false, message: '没有这个家具：' + kind }
@@ -135,6 +154,7 @@ export default {
 
     function sell(kind) {
       const d = load()
+      if (kind === FISH.kind) return { ok: false, message: '不能把小鱼卖掉' }
       const c = meta(kind)
       if (!c || !has(d, kind)) return { ok: false, message: '没有这件东西' }
       d.items = d.items.filter((i) => i.kind !== kind)
@@ -147,13 +167,19 @@ export default {
     function preset() {
       const d = load()
       // 标准摆法：已有的挪到原位，没有的（够钱就）买一件放上去
+      // 标准摆法：已有的挪到原位；只有这 8 件会顺手补买，装饰件不自动花钱
       const spots = {
-        rug: [46, 80], desk: [26, 76], sofa: [56, 80], lamp: [9, 72],
-        bed: [86, 78], snacks: [42, 92], frame: [86, 24], plant: [4, 92],
+        rug: [46, 80], desk: [33, 76], sofa: [60, 80], lamp: [6, 88],
+        bed: [85, 78], snacks: [41, 92], frame: [93, 24], plant: [2, 94],
+        shelf: [6, 68], fishtank: [57, 94], mirror: [93, 90], cushion: [33, 92],
+        clock: [16, 14], lights: [72, 8], tv: [46, 27], pc: [69, 93],
+        cooker: [25, 92], washer: [17, 70], fish: [49, 88],
       }
+      const AUTO = new Set(['rug', 'desk', 'sofa', 'lamp', 'bed', 'snacks', 'frame', 'plant'])
       for (const [k, s] of Object.entries(spots)) {
         const it = d.items.find((i) => i.kind === k)
         if (it) { it.x = s[0]; it.y = s[1]; it.at = Date.now(); continue }
+        if (!AUTO.has(k)) continue
         const c = meta(k)
         if (!c || d.coins < c.price) continue
         d.coins -= c.price
@@ -194,8 +220,8 @@ export default {
         earnPerDay: st.earnPerDay,
         mood: moodInfo(),
         items: d.items.map((i) => {
-          const c = meta(i.kind)
-          return { kind: i.kind, name: c.name, x: i.x, y: i.y }
+          const c = meta(i.kind) || (i.kind === FISH.kind ? FISH : null)
+          return { kind: i.kind, name: c ? c.name : i.kind, x: i.x, y: i.y }
         }),
         catalog: CATALOG.map((c) => ({
           kind: c.kind, name: c.name, price: c.price, hint: c.hint, owned: has(d, c.kind),
