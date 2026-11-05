@@ -2,7 +2,7 @@
 // 面板会执行这段函数体，最后 return 一个 React 组件；toast / settings 从组件 props 拿
 const { useState, useEffect } = React
 
-return function XhsPanel({ settings, toast }) {
+return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
   const [st, setSt] = useState(null)
   const [busy, setBusy] = useState('')
   const [note, setNote] = useState('')
@@ -77,19 +77,31 @@ return function XhsPanel({ settings, toast }) {
   const quotaText = st ? `今天回了 ${st.today || 0} 条${st.daily ? ' / 上限 ' + st.daily : '（不限）'}` : ''
   const cookieText = st ? (st.cookie ? 'cookie 有（面板粘贴）' : 'cookie 没有：面板里粘一份') : ''
 
+  const cur = { ...(settings || {}), ...(draftSettings || {}) }
+  const full = cur.fullMode === true
+  const patch = (key, value) => {
+    try { setSettings?.({ [key]: value }) } catch { /* 老插件没有这个属性 */ }
+    say('已改，记得点下面的「保存设置」')
+  }
+  const sw = (key, label, hint, forceOff) => h(ui.Row, { label, hint },
+    h(ui.Switch, { on: cur[key] !== false, disabled: forceOff, onChange: (v) => patch(key, v) }))
+
   const flag = (on, text) => h('span', { className: 'ab-small', style: { marginRight: 10, opacity: on ? 1 : 0.45 } }, (on ? '✓ ' : '✗ ') + text)
 
   return h(ui.Card, { title: '小红书' },
     h('div', { className: 'ab-note', style: { marginBottom: 4 } }, bridgeText),
-    modeText ? h('div', { className: 'ab-small ab-muted', style: { marginBottom: 8 } }, modeText) : null,
+    h(ui.Row, { label: '完整功能（搜索 / 评论 / 点赞）', hint: '默认关。打开并保存后，下面三个开关才生效；桥不通时这些工具仍然不会出现' },
+      h(ui.Switch, { on: full, onChange: (v) => patch('fullMode', v) })),
+    h('div', { className: 'ab-small ab-muted', style: { margin: '2px 0 8px' } }, full ? '下面的开关需要桥在线才会生效' : '现在是基础模式：只能读笔记；要用下面的功能，先打开完整功能并装桥'),
+    sw('enableSearch', '允许搜索', '需要桥；关掉后她不会去搜，只能读别人发来的链接', !full),
+    sw('enableComments', '允许读评论', '需要桥；关掉后不挂读评论工具', !full),
+    sw('allowComment', '允许回帖', '需要桥；只有主人私聊能触发，仍受间隔和每日上限约束', !full),
+    modeText ? h('div', { className: 'ab-small ab-muted', style: { marginTop: 8, marginBottom: 8 } }, modeText) : null,
     h('div', { style: { marginBottom: 6 } },
       h('span', { className: 'ab-muted ab-small' }, quotaText + '　·　' + cookieText)),
     st && st.flags
       ? h('div', { style: { marginBottom: 8 } },
-        flag(st.flags.enableSearch, '搜索'),
         flag(st.flags.enableRead, '读笔记'),
-        flag(st.flags.enableComments, '读评论'),
-        flag(st.flags.allowComment, '回帖'),
         flag(st.flags.groupRead, '群里可用'),
         flag(st.flags.sendImages, '发配图')
       )

@@ -36,9 +36,7 @@ export default {
     { key: 'bridgeUrl', label: '桥地址', type: 'text', hint: '本地 Python 桥，默认 http://127.0.0.1:8099' },
     { key: 'bridgeToken', label: '桥密钥', type: 'password', hint: '桥设了 XHS_BRIDGE_TOKEN 就填这里' },
     { key: 'cookie', label: '小红书 cookie', type: 'textarea', hint: '手动粘贴：整串 cookie 粘进来（a=1; b=2; …）。只认这一份，不读文件' },
-    { key: 'enableSearch', label: '允许搜索', type: 'switch', hint: '关掉后她不会去搜，只能读别人发来的链接' },
     { key: 'enableRead', label: '允许读笔记', type: 'switch', hint: '关掉后链接也打不开' },
-    { key: 'enableComments', label: '允许读评论', type: 'switch' },
     { key: 'groupRead', label: '群里也能看', type: 'switch', hint: '默认关：只有主人私聊能看。群友让她看会消耗桥的额度' },
     { key: 'sendImages', label: '顺便发配图', type: 'switch' },
     { key: 'sendImagesInGroup', label: '群里也发配图', type: 'switch', hint: '默认关，避免在群里刷图' },
@@ -46,11 +44,9 @@ export default {
     { key: 'imageGapMs', label: '配图间隔(毫秒)', type: 'number', min: 0, max: 5000, step: 100, hint: '连发多张之间的停顿，太小容易被网关限流' },
     { key: 'maxDescChars', label: '正文最多读多少字', type: 'number', min: 200, max: 6000, step: 100, hint: '太长会截断，省 token' },
     { key: 'maxResults', label: '搜索返回几条', type: 'number', min: 1, max: 20, step: 1 },
-    { key: 'allowComment', label: '允许回帖', type: 'switch', hint: '关掉就只能看，不能回' },
     { key: 'cooldownSec', label: '两条评论间隔(秒)', type: 'number', min: 0, max: 3600, step: 10 },
     { key: 'dailyComments', label: '每天最多回几条', type: 'number', min: 0, max: 200, step: 1, hint: '0 = 不限。按自然日算，落盘，重启不清零' },
     { key: 'riskCooldownMin', label: '风控冷却(分钟)', type: 'number', min: 1, max: 1440, step: 1, hint: '撞到验证码/429 后暂停多久' },
-    { key: 'fullMode', label: '完整功能（搜索/评论/点赞）', type: 'switch', hint: '要先装桥。默认只读笔记，桥不通时开了也不会挂出这些工具' },
   ],
 
   setup(api) {
