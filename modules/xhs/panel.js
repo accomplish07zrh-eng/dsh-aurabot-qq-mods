@@ -20,32 +20,32 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
   useEffect(() => { load() }, [])
 
   const GUIDE = [
-    '帮我在本机搭一座小红书桥，Aurabot 的 xhs 模块用。桥是个本地 HTTP 服务，负责签名后转调小红书接口。',
+    '帮我在本机搭一座小红书桥（Aurabot 的 xhs 模块要用）。桥是个本地 HTTP 服务，负责签名后转调小红书接口。',
+    '按下面 7 步做，第 7 步是开机自启，别漏。',
     '',
-    '接口（默认 127.0.0.1:8099，设了 XHS_BRIDGE_TOKEN 就要求 Authorization: Bearer <token>）：',
-    'GET  /health                          → {ok, user:{nickname, red_id, guest}}',
-    'GET  /search?q=&page=                 → {ok, items:[{id, token, title, author, likes, comments, type}]}',
+    '【接口】默认 127.0.0.1:8099；设了 XHS_BRIDGE_TOKEN 就要求 Authorization: Bearer <token>',
+    'GET  /health                              → {ok, user:{nickname, red_id, guest}}',
+    'GET  /search?q=&page=                     → {ok, items:[{id, token, title, author, likes, comments, type}]}',
     'GET  /comments?id=&token=&parent=&cursor= → {ok, comments:[{id, author, ip, likes, sub_count, content}], cursor, has_more}',
     'POST /comment {note_id, content, reply_comment_id?, at_user_id?} → {ok, toast, comment_id, http}（风控时 ok=false 且带 verifytype）',
-    'POST /like    {note_id, action}       → {ok, msg}（action 为 like / unlike；内部走 /api/sns/web/v1/note/dislike，参数名 note_oid）',
-    'GET  /replies?limit=                  → {ok, count, items:[{note_id, reply_comment_id, user_id, author, content, iso}]}',
+    'POST /like    {note_id, action}           → {ok, msg}（action 为 like / unlike；内部走 /api/sns/web/v1/note/dislike，参数名 note_oid）',
+    'GET  /replies?limit=                      → {ok, count, items:[{note_id, reply_comment_id, user_id, author, content, iso}]}',
+    'GET  /mine?limit=                         → {ok, items:[…]}',
     '',
-    '做法：克隆 https://github.com/cv-cat/Spider_XHS 做签名，写一个 python3 标准库的 http.server 包一层；',
-    'cookie 用浏览器 CDP 的 Network.getAllCookies 导出成 dict，存 ~/xhs-bridge/xhs_cookies.json，每次操作后回写；',
-    '起服务：XHS_BRIDGE_HOST=127.0.0.1 XHS_BRIDGE_PORT=8099 XHS_BRIDGE_TOKEN=<随机串> python3 xhs_bridge.py',
-    '自检：curl -s -H "Authorization: Bearer <随机串>" http://127.0.0.1:8099/health，guest 必须是 false。',
-    '',
-    '',
+    '1. 拉签名依赖：git clone https://github.com/cv-cat/Spider_XHS ~/xhs-bridge/spider_xhs',
+    '2. 写桥：python3 标准库的 http.server 包一层，按上面接口实现，签名交给 Spider_XHS；每次操作后回写 cookie 文件',
+    '3. 导 cookie：浏览器 CDP 的 Network.getAllCookies 导出成 dict，存 ~/xhs-bridge/xhs_cookies.json',
+    '4. 起服务：cd ~/xhs-bridge && XHS_BRIDGE_HOST=127.0.0.1 XHS_BRIDGE_PORT=8099 XHS_BRIDGE_TOKEN=<随机串> python3 xhs_bridge.py',
+    '5. 自检：curl -s -H "Authorization: Bearer <随机串>" http://127.0.0.1:8099/health，guest 要是 false',
+    '6. 告诉我端口和 token，我填进 Aurabot 模块，再点「测试连接」确认',
     '7. 常驻与自启（必须做，不做的话机器一重启桥就没了）：',
-    '   Linux/NAS：写 systemd 服务 /etc/systemd/system/xhs-bridge.service，Type=simple，Restart=always，RestartSec=3，',
-    '     WantedBy=multi-user.target，Environment 里放 XHS_BRIDGE_HOST/PORT/TOKEN，ExecStart 指向 venv 里的 python；',
+    '   Linux/NAS：/etc/systemd/system/xhs-bridge.service，Type=simple，Restart=always，RestartSec=3，WantedBy=multi-user.target，',
+    '     Environment 放 XHS_BRIDGE_HOST/PORT/TOKEN，ExecStart 指向 venv 里的 python；',
     '     然后 sudo systemctl daemon-reload && sudo systemctl enable --now xhs-bridge',
-    '   Docker：compose 里 restart: always，端口只映射到回环 127.0.0.1:8099:8099，cookie 目录挂进去',
+    '   Docker：compose 里 restart: always，端口只映射回环 127.0.0.1:8099:8099，cookie 目录挂进去',
     '   Windows：任务计划程序「登录时运行」指向一个 bat（先 set 环境变量，再 pythonw xhs_bridge.py），',
-    '     或者 nssm install XhsBridge <python.exe> xhs_bridge.py 之后 nssm set XhsBridge Start SERVICE_AUTO_START',
-    '   配完重启一次机器，再 curl /health 确认自己起来了。',
-    '',
-    '做完把端口和 token 告诉我，我填进 Aurabot 模块；8099 不通就查进程和防火墙。',
+    '     或者 nssm install XhsBridge <python.exe> xhs_bridge.py，然后 nssm set XhsBridge Start SERVICE_AUTO_START',
+    '   配完重启一次机器，再 curl /health 确认它自己起来了。',
   ].join('\n')
 
   const copyGuide = async () => {
@@ -92,6 +92,19 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
     h('div', { className: 'ab-note', style: { marginBottom: 4 } }, bridgeText),
     h(ui.Row, { label: '完整功能（搜索 / 评论 / 点赞）', hint: '默认关。打开并保存后，下面三个开关才生效；桥不通时这些工具仍然不会出现' },
       h(ui.Switch, { on: full, onChange: (v) => patch('fullMode', v) })),
+
+    // 搭桥说明：先复制，粘给用户自己的 DSH；第 7 条是开机自启
+    h(ui.Row, { label: '搭桥（用完整功能才需要）', hint: '点「复制部署说明」，粘给你自己的 DSH / 别的 AI；它会装桥、配开机自启，做完把地址和密钥填到设置里' },
+      h(ui.Btn, { onClick: copyGuide }, '复制部署说明')),
+
+    showGuide
+      ? h('textarea', {
+        readOnly: true,
+        value: GUIDE,
+        onFocus: (e) => { try { e.target.select() } catch { /* ignore */ } },
+        style: { width: '100%', height: 180, margin: '4px 0 8px', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 },
+      })
+      : null,
     h('div', { className: 'ab-small ab-muted', style: { margin: '2px 0 8px' } }, full ? '下面的开关需要桥在线才会生效' : '现在是基础模式：只能读笔记；要用下面的功能，先打开完整功能并装桥'),
     sw('enableSearch', '允许搜索', '需要桥；关掉后她不会去搜，只能读别人发来的链接', !full),
     sw('enableComments', '允许读评论', '需要桥；关掉后不挂读评论工具', !full),
@@ -109,7 +122,6 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
     h(ui.Row, null,
       h(ui.Btn, { onClick: load }, '刷新'),
       h(ui.Btn, { onClick: () => act('/bridge/test', '测试连接') }, busy === '/bridge/test' ? '测试中…' : '测试连接'),
-      h(ui.Btn, { onClick: copyGuide }, '复制部署说明'),
       h(ui.Btn, { onClick: () => act('/cookie/check', '检查 cookie') }, busy === '/cookie/check' ? '检查中…' : '检查 cookie'),
       h(ui.Btn, { onClick: () => act('/quota/reset', '清零额度') }, busy === '/quota/reset' ? '清零中…' : '清零今日额度'),
       st && st.riskMinutes
@@ -118,14 +130,6 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
     ),
     st && st.riskWhy
       ? h('div', { className: 'ab-small ab-muted', style: { marginTop: 6 } }, '上次风控：' + st.riskWhy)
-      : null,
-    showGuide
-      ? h('textarea', {
-        readOnly: true,
-        value: GUIDE,
-        onFocus: (e) => { try { e.target.select() } catch { /* ignore */ } },
-        style: { width: '100%', height: 180, marginTop: 8, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 },
-      })
       : null,
     note
       ? h('div', { className: 'ab-small ab-muted', style: { marginTop: 6 } }, note)
