@@ -223,11 +223,15 @@ export default {
     }
 
     async function doLike({ id, url, action }) {
+      const risk = riskMinutesLeft()
+      if (risk) return { ok: false, message: `小红书还在风控冷却里，再等 ${risk} 分钟` }
       let noteId = String(id || '').trim()
       if (!noteId && url) noteId = parseIds(pickLink(url) || url).id
       if (!noteId) throw new Error('给我 note_id 或者笔记链接')
       const act = action === 'unlike' || action === '取消' || action === '取消赞' ? 'unlike' : 'like'
-      const r = await bridge.like(noteId, act)
+      let r
+      try { r = await bridge.like(noteId, act) }
+      catch (e) { noteRisk(e); throw e }
       return { ok: true, message: (act === 'like' ? '点了赞' : '取消赞了') + `（${noteId}）` }
     }
 
@@ -239,11 +243,11 @@ export default {
       return {
         ok: true,
         message: `有人回我了，共 ${r.count} 条：\n` + lines.join('\n') +
-          '\n\n要接话就调 xhs_comment：id 用 note_id，reply_to 用 reply_comment_id，at_user_id 用 at 那个号。',
+          '\n\n要接话就调 xhs_comment：id 用 note_id，reply_to 用 reply_comment_id，at_user 用 at 那个号。',
       }
     }
 
-    async function doComment({ id, url, content, replyTo, atUser }, chat) {
+    async function doComment({ id, url, content, reply_to, replyTo, at_user, atUser }, chat) {
       const s = settings()
       if (s.allowComment === false) return { ok: false, message: '回帖功能被关掉了（面板里能开）' }
       if (!(chat && chat.kind === 'private' && api.isOwner(chat.userId))) {
@@ -275,9 +279,12 @@ export default {
       }
       if (!noteId) throw new Error('给我 note_id 或者笔记链接')
 
+      const replyId = String(reply_to || replyTo || '').trim() || null
+      const atId = String(at_user || atUser || '').trim() || null
+
       let r
       try {
-        r = await bridge.postComment({ noteId, content: body, replyCommentId: replyTo || null })
+        r = await bridge.postComment({ noteId, content: body, replyCommentId: replyId, atUserId: atId })
       } catch (e) {
         noteRisk(e)
         throw e
@@ -291,7 +298,7 @@ export default {
           importance: 0.4,
         })
       } catch { /* 记不上不影响发出去 */ }
-      log.info(`发了评论：note=${noteId} ${replyTo ? 'reply=' + replyTo + ' ' : ''}${body.slice(0, 30)}`)
+      log.info(`发了评论：note=${noteId} ${replyId ? 'reply=' + replyId + ' ' : ''}${atId ? 'at=' + atId + ' ' : ''}${body.slice(0, 30)}`)
       return {
         ok: true,
         message: `发出去了（${r.toast || '已发布'}）comment_id=${r.comment_id || '?'}` +
@@ -371,7 +378,7 @@ export default {
         }))
       }
 
-      if (chat.kind === 'private' && api.isOwner(chat.userId)) {
+      if (withBridge && chat.kind === 'private' && api.isOwner(chat.userId)) {
         tools.push(api.defineTool({
           name: 'xhs_like',
           description: '给小红书笔记点赞或取消赞。主人让你点个赞、或者说这条不错点一下时用。',
