@@ -1,8 +1,8 @@
 {
   "id": "xhs",
   "name": "看小红书",
-  "version": "0.5.0",
-  "description": "逛小红书：搜索笔记、看正文和配图、读评论、回评论、点赞。签名请求交给本地 Python 桥（xhs-bridge），读正文走页面 SSR。",
+  "version": "0.6.0",
+  "description": "默认基础模式：粘个 cookie 就能读正文和配图。想搜索/评论/点赞，按面板里的部署说明在本机搭一座桥，再打开完整功能。",
   "category": "platform",
   "tags": [
     "小红书",

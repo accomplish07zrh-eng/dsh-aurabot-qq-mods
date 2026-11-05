@@ -8,7 +8,7 @@ import { readNote, cacheImage, pickLink, parseIds, buildUrl } from './lib/read.m
 export default {
   id: 'xhs',
   name: '看小红书',
-  version: '0.5.0',
+  version: '0.6.0',
   api: 1,
   description: '搜笔记、看帖子、读评论、回评论；靠本地桥做签名请求',
   panel: 'panel.js',
@@ -30,6 +30,7 @@ export default {
     cooldownSec: 60,
     dailyComments: 10,
     riskCooldownMin: 10,
+    fullMode: false,
   },
   settings: [
     { key: 'bridgeUrl', label: '桥地址', type: 'text', hint: '本地 Python 桥，默认 http://127.0.0.1:8099' },
@@ -49,6 +50,7 @@ export default {
     { key: 'cooldownSec', label: '两条评论间隔(秒)', type: 'number', min: 0, max: 3600, step: 10 },
     { key: 'dailyComments', label: '每天最多回几条', type: 'number', min: 0, max: 200, step: 1, hint: '0 = 不限。按自然日算，落盘，重启不清零' },
     { key: 'riskCooldownMin', label: '风控冷却(分钟)', type: 'number', min: 1, max: 1440, step: 1, hint: '撞到验证码/429 后暂停多久' },
+    { key: 'fullMode', label: '完整功能（搜索/评论/点赞）', type: 'switch', hint: '要先装桥。默认只读笔记，桥不通时开了也不会挂出这些工具' },
   ],
 
   setup(api) {
@@ -314,7 +316,7 @@ export default {
       if (chat.kind === 'group' && s.groupRead !== true) return []
       const tools = []
 
-      const withBridge = bridgeOk !== false
+      const withBridge = s.fullMode === true && bridgeOk !== false
       if (s.enableSearch !== false && withBridge) tools.push(api.defineTool({
         name: 'xhs_search',
         description: '在小红书搜笔记，返回标题、作者、点赞评论数和 id/token。想找某个话题的内容、或者别人让你去小红书看看时用。',
@@ -436,7 +438,9 @@ export default {
         lastCommentAt: Number(st.lastCommentAt) || 0,
         riskMinutes: riskMinutesLeft(),
         riskWhy: st.riskWhy || '',
+        fullMode: s.fullMode === true,
         flags: {
+          fullMode: s.fullMode === true,
           enableSearch: s.enableSearch !== false,
           enableRead: s.enableRead !== false,
           enableComments: s.enableComments !== false,
@@ -468,6 +472,21 @@ export default {
     api.route('/quota/reset', async () => {
       saveState({ day: today(), count: 0, lastCommentAt: 0 })
       return { ok: true, message: '今天的评论额度清零了' }
+    })
+
+    api.route('/bridge/test', async () => {
+      try {
+        const h = await bridge.health({ timeoutMs: 5000 })
+        const u = h.user || {}
+        const nick = u.nickname || '?'
+        return {
+          ok: true,
+          guest: Boolean(u.guest),
+          message: u.guest ? `桥通了，但没登录（guest）——重新导一份 cookie` : `桥通了，登录的是 ${nick}`,
+        }
+      } catch (e) {
+        return { ok: false, message: '连不上桥：' + String(e.message || e).slice(0, 120) }
+      }
     })
 
     api.route('/cookie/check', async () => {
