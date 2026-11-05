@@ -1,0 +1,27 @@
+{
+  "id": "kanzhibo",
+  "name": "抖音看直播",
+  "version": "0.4.3",
+  "description": "用一台独立 Edge 通过 CDP 挂在抖音直播间：进房、进房后发一条定制评论、续粉丝团灯牌；挂着的时候自动暂停刷抖音。",
+  "category": "platform",
+  "tags": [
+    "抖音",
+    "直播",
+    "挂机",
+    "灯牌",
+    "CDP"
+  ],
+  "author": "YG",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "network",
+    "filesystem",
+    "process",
+    "plugin-config",
+    "plugin-internals"
+  ],
+  "homepage": "https://github.com/h752603-source/dsh-aurabot-mod-kanzhibo"
+}
