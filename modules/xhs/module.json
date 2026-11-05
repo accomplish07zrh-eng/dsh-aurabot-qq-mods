@@ -1,0 +1,22 @@
+{
+  "id": "xhs",
+  "name": "看小红书",
+  "version": "0.4.1",
+  "description": "逛小红书：搜索笔记、看正文和配图、读评论、回评论。签名请求交给本地 Python 桥（xhs-bridge），读正文走页面 SSR。",
+  "category": "platform",
+  "tags": [
+    "小红书",
+    "搜索",
+    "评论"
+  ],
+  "author": "yuccc7878",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "network",
+    "filesystem"
+  ],
+  "homepage": "https://github.com/aureth-labs/dsh-aurabot-qq-mods"
+}
