@@ -416,7 +416,7 @@ export default {
       const st = readState()
       let bridgeInfo
       try {
-        const h = await bridge.health({ timeoutMs: 4000 })
+        const h = await bridge.health({ timeoutMs: 6000 })
         const u = h.user || {}
         bridgeInfo = { ok: true, nickname: u.nickname || '', redId: u.red_id || u.redId || '', guest: Boolean(u.guest) }
       } catch (e) {
