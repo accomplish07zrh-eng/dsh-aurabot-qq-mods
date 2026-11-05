@@ -41,7 +41,9 @@ XHS_BRIDGE_PORT=8099 XHS_BRIDGE_TOKEN=<随机串> python3 xhs_bridge.py
 | `xhs_search` | 搜笔记，回标题、作者、赞评数和 `id` + `token` |
 | `xhs_read` | 看一条笔记的正文和配图。**纯 id 必须同时给 token**，否则页面是空壳 |
 | `xhs_comments` | 读评论 / 楼中楼 |
-| `xhs_comment` | 发评论或回复某条评论。**只有主人私聊时才会挂出来**，且受 `allowComment` 和冷却限制 |
+| `xhs_comment` | 发评论或回复某条评论（`reply_to` 填对方 comment_id，`at_user` 填对方 user_id 才会 @ 到人）。**只有主人私聊时才会挂出来**，且受 `allowComment` 和冷却限制 |
+| `xhs_like` | 点赞 / 取消赞（`action` 为 `like` 或 `unlike`）。仅主人私聊 |
+| `xhs_replies` | 看谁回复了我发过的评论，返回 note_id / reply_comment_id / 对方 user_id，可直接接着回。仅主人私聊 |
 
 命令：`/xhs 链接`、`/xhs 关键词`、`/xhs 健康`。
 

@@ -47,11 +47,37 @@ export function createBridge(getBase, getToken = () => '') {
       return r
     },
 
+    /** 点赞 / 取消赞 */
+    async like(noteId, action = 'like') {
+      const r = await call(base(), '/like', {
+        method: 'POST',
+        body: { note_id: String(noteId), action },
+        timeout: 60000,
+        token: tk(),
+      })
+      if (!r.ok) throw new Error(r.msg || r.message || '操作失败')
+      return r
+    },
+
+    /** 我发过的评论 */
+    async mine(limit = 20) {
+      const r = await call(base(), `/mine?limit=${limit}`, { timeout: 30000, token: tk() })
+      if (!r.ok) throw new Error(r.message || '读不到')
+      return r.items || []
+    },
+
+    /** 谁回了我的评论 */
+    async replies(limit = 10) {
+      const r = await call(base(), `/replies?limit=${limit}`, { timeout: 180000, token: tk() })
+      if (!r.ok) throw new Error(r.message || '读不到')
+      return r
+    },
+
     /** 发评论 / 楼中楼 */
-    async postComment({ noteId, content, replyCommentId = null }) {
+    async postComment({ noteId, content, replyCommentId = null, atUserId = null }) {
       const r = await call(base(), '/comment', {
         method: 'POST',
-        body: { note_id: String(noteId), content: String(content), reply_comment_id: replyCommentId },
+        body: { note_id: String(noteId), content: String(content), reply_comment_id: replyCommentId, at_user_id: atUserId },
         timeout: 120000,
         token: tk(),
       })

@@ -8,7 +8,7 @@ import { readNote, cacheImage, pickLink, parseIds, buildUrl } from './lib/read.m
 export default {
   id: 'xhs',
   name: '看小红书',
-  version: '0.4.1',
+  version: '0.5.0',
   api: 1,
   description: '搜笔记、看帖子、读评论、回评论；靠本地桥做签名请求',
   panel: 'panel.js',
@@ -222,7 +222,28 @@ export default {
       }
     }
 
-    async function doComment({ id, url, content, replyTo }, chat) {
+    async function doLike({ id, url, action }) {
+      let noteId = String(id || '').trim()
+      if (!noteId && url) noteId = parseIds(pickLink(url) || url).id
+      if (!noteId) throw new Error('给我 note_id 或者笔记链接')
+      const act = action === 'unlike' || action === '取消' || action === '取消赞' ? 'unlike' : 'like'
+      const r = await bridge.like(noteId, act)
+      return { ok: true, message: (act === 'like' ? '点了赞' : '取消赞了') + `（${noteId}）` }
+    }
+
+    async function doReplies({ limit } = {}) {
+      const r = await bridge.replies(Number(limit) || 10)
+      if (!r.count) return { ok: true, message: '我发过的评论下面暂时没人回。想看得勤一点，可以让我隔一阵再查。' }
+      const lines = r.items.slice(0, 10).map((x, i) =>
+        `${i + 1}. ${x.author}：${x.content.slice(0, 80)}${x.iso ? '（' + x.iso + '）' : ''}\n   note_id=${x.note_id} reply_comment_id=${x.reply_comment_id} at=${x.user_id}`)
+      return {
+        ok: true,
+        message: `有人回我了，共 ${r.count} 条：\n` + lines.join('\n') +
+          '\n\n要接话就调 xhs_comment：id 用 note_id，reply_to 用 reply_comment_id，at_user_id 用 at 那个号。',
+      }
+    }
+
+    async function doComment({ id, url, content, replyTo, atUser }, chat) {
       const s = settings()
       if (s.allowComment === false) return { ok: false, message: '回帖功能被关掉了（面板里能开）' }
       if (!(chat && chat.kind === 'private' && api.isOwner(chat.userId))) {
@@ -340,11 +361,40 @@ export default {
             url: { type: 'string', description: '或者笔记链接' },
             content: { type: 'string', description: '评论内容，300 字以内' },
             reply_to: { type: 'string', description: '要回复的 comment_id（楼中楼），不填就是直接评论' },
+            at_user: { type: 'string', description: '要 @ 的用户 id（回复别人的回复时填上，对方才收得到提醒）' },
           },
           required: ['content'],
           execute: async (args) => {
             try { return await doComment(args || {}, chat) }
             catch (e) { log.warn('发评论失败：' + e.message); return { ok: false, message: '没发出去：' + e.message } }
+          },
+        }))
+      }
+
+      if (chat.kind === 'private' && api.isOwner(chat.userId)) {
+        tools.push(api.defineTool({
+          name: 'xhs_like',
+          description: '给小红书笔记点赞或取消赞。主人让你点个赞、或者说这条不错点一下时用。',
+          properties: {
+            id: { type: 'string', description: 'note_id' },
+            url: { type: 'string', description: '或者笔记链接' },
+            action: { type: 'string', description: 'like（默认）或 unlike' },
+          },
+          execute: async (args) => {
+            try { return await doLike(args || {}) }
+            catch (e) { log.warn('点赞失败：' + e.message); return { ok: false, message: '没成功：' + e.message } }
+          },
+        }))
+
+        tools.push(api.defineTool({
+          name: 'xhs_replies',
+          description: '看谁回复了我发过的评论。想知道有没有人接话、要不要继续聊时用。',
+          properties: {
+            limit: { type: 'number', description: '看最近几条，默认 10' },
+          },
+          execute: async (args) => {
+            try { return await doReplies(args || {}) }
+            catch (e) { log.warn('查回复失败：' + e.message); return { ok: false, message: '查不到：' + e.message } }
           },
         }))
       }
