@@ -33,8 +33,6 @@ export default {
     fullMode: false,
   },
   settings: [
-    { key: 'bridgeUrl', label: '桥地址', type: 'text', hint: '本地 Python 桥，默认 http://127.0.0.1:8099' },
-    { key: 'bridgeToken', label: '桥密钥', type: 'password', hint: '桥设了 XHS_BRIDGE_TOKEN 就填这里' },
     { key: 'cookie', label: '小红书 cookie', type: 'textarea', hint: '手动粘贴：整串 cookie 粘进来（a=1; b=2; …）。只认这一份，不读文件' },
     { key: 'enableRead', label: '允许读笔记', type: 'switch', hint: '关掉后链接也打不开' },
     { key: 'groupRead', label: '群里也能看', type: 'switch', hint: '默认关：只有主人私聊能看。群友让她看会消耗桥的额度' },
@@ -426,6 +424,7 @@ export default {
         ok: true,
         pluginVersion: api.version,
         bridge: bridgeInfo,
+        bridgeUrl: String(s.bridgeUrl || 'http://127.0.0.1:8099'),
         cookie: Boolean(info.cookie),
         cookieSource: info.source,
         today: used,

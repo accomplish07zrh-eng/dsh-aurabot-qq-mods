@@ -60,10 +60,10 @@ GET  /mine?limit=<条数>
 
 ## 设置
 
+桥地址和密钥不在设置页里：模块默认连 `http://127.0.0.1:8099`，桥不设密钥就能用。只有跨容器、换端口或者桥设了 `XHS_BRIDGE_TOKEN` 时，才需要在插件配置文件里改 `bridgeUrl` / `bridgeToken`（这两项仍然存在，只是不显示）。
+
 | 设置项 | 说明 |
 |---|---|
-| `bridgeUrl` | 桥地址，默认 `http://127.0.0.1:8099` |
-| `bridgeToken` | 桥设了密钥就填这里 |
 | `cookie` | **手动粘贴**的小红书 cookie，模块唯一的 cookie 来源 |
 | `enableSearch` / `enableRead` / `enableComments` | 三个能力各自的开关 |
 | `groupRead` | 群里也能用（默认关，只有主人私聊） |

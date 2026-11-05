@@ -23,7 +23,7 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
     '帮我在本机搭一座小红书桥（Aurabot 的 xhs 模块要用）。桥是个本地 HTTP 服务，负责签名后转调小红书接口。',
     '按下面 7 步做，第 7 步是开机自启，别漏。',
     '',
-    '【接口】默认 127.0.0.1:8099；设了 XHS_BRIDGE_TOKEN 就要求 Authorization: Bearer <token>',
+    '【接口】默认 127.0.0.1:8099；只有跨容器这类场景才设 XHS_BRIDGE_TOKEN，设了就要带 Authorization: Bearer <token>',
     'GET  /health                              → {ok, user:{nickname, red_id, guest}}',
     'GET  /search?q=&page=                     → {ok, items:[{id, token, title, author, likes, comments, type}]}',
     'GET  /comments?id=&token=&parent=&cursor= → {ok, comments:[{id, author, ip, likes, sub_count, content}], cursor, has_more}',
@@ -35,9 +35,9 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
     '1. 拉签名依赖：git clone https://github.com/cv-cat/Spider_XHS ~/xhs-bridge/spider_xhs',
     '2. 写桥：python3 标准库的 http.server 包一层，按上面接口实现，签名交给 Spider_XHS；每次操作后回写 cookie 文件',
     '3. 导 cookie：浏览器 CDP 的 Network.getAllCookies 导出成 dict，存 ~/xhs-bridge/xhs_cookies.json',
-    '4. 起服务：cd ~/xhs-bridge && XHS_BRIDGE_HOST=127.0.0.1 XHS_BRIDGE_PORT=8099 XHS_BRIDGE_TOKEN=<随机串> python3 xhs_bridge.py',
-    '5. 自检：curl -s -H "Authorization: Bearer <随机串>" http://127.0.0.1:8099/health，guest 要是 false',
-    '6. 告诉我端口和 token，我填进 Aurabot 模块，再点「测试连接」确认',
+    '4. 起服务：cd ~/xhs-bridge && XHS_BRIDGE_HOST=127.0.0.1 XHS_BRIDGE_PORT=8099 python3 xhs_bridge.py',
+    '5. 自检：curl -s http://127.0.0.1:8099/health，guest 要是 false',
+    '6. 做完告诉我一声就行：模块默认连 127.0.0.1:8099、不带密钥，不用改任何设置；只有你换了端口或设了密钥，才需要在模块配置里改 bridgeUrl / bridgeToken',
     '7. 常驻与自启（必须做，不做的话机器一重启桥就没了）：',
     '   Linux/NAS：/etc/systemd/system/xhs-bridge.service，Type=simple，Restart=always，RestartSec=3，WantedBy=multi-user.target，',
     '     Environment 放 XHS_BRIDGE_HOST/PORT/TOKEN，ExecStart 指向 venv 里的 python；',
@@ -72,7 +72,7 @@ return function XhsPanel({ settings, draftSettings, setSettings, toast }) {
   }
 
   const b = st && st.bridge ? st.bridge : null
-  const bridgeText = !st ? '读取中…' : (b && b.ok ? `桥在线 · ${b.nickname || '?'}（${b.redId || '?'}）` : `桥没起：现在只能读笔记；搜索/评论/点赞要额外装桥（见 README）`)
+  const bridgeText = !st ? '读取中…' : (b && b.ok ? `桥在线 · ${b.nickname || '?'}（${b.redId || '?'}）` : `桥没起（${(st && st.bridgeUrl) || 'http://127.0.0.1:8099'}）：现在只能读笔记；要完整功能就按下面的说明搭桥`)
   const modeText = !st ? '' : (st.fullMode ? '完整模式：搜索 / 评论 / 点赞已开' : '基础模式：只能读笔记；要搜索评论就装桥并打开完整功能')
   const quotaText = st ? `今天回了 ${st.today || 0} 条${st.daily ? ' / 上限 ' + st.daily : '（不限）'}` : ''
   const cookieText = st ? (st.cookie ? 'cookie 有（面板粘贴）' : 'cookie 没有：面板里粘一份') : ''
