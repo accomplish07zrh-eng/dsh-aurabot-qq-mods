@@ -10,6 +10,6 @@
   "api": 1,
   "minPluginVersion": "1.2.0",
   "requires": [],
-  "capabilities": ["network", "filesystem", "process", "dynamic-code", "plugin-config", "plugin-internals"],
+  "capabilities": ["network", "filesystem", "process", "plugin-config", "plugin-internals"],
   "build": { "out": ".build" }
 }
