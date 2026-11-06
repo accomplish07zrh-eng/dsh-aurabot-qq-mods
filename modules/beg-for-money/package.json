@@ -1,6 +1,6 @@
 {
   "name": "aurabot-beg-for-money",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Aurabot 的讨饭扩展：收款码、管理员确认记账、原群道谢，装了印象卡片时加「慷慨」",

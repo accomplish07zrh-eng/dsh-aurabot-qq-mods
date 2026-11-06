@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin from '../index.mjs'
@@ -23,11 +23,13 @@ function makeApi (opts = {}) {
   const dir = opts.dir || mkdtempSync(join(tmpdir(), 'beg-module-'))
   const settings = { ...(plugin.defaults), ...(opts.settings || {}) }
   const ext = opts.ext || {}
+  // 宿主全局配置：测试里可以改（试运行 / 总开关）。
+  const config = { ownerQQ: OWNER, enabled: true, dryRun: false, ...(opts.config || {}) }
   const api = {
     id: 'beg-for-money',
     dir,
     log: { debug () {}, info () {}, warn () {}, error () {} },
-    config: () => ({ ownerQQ: OWNER, enabled: true, dryRun: false }),
+    config: () => ({ ...config }),
     settings: () => ({ ...settings }),
     saveSettings: (patch) => Object.assign(settings, patch),
     dataDir: (...parts) => {
@@ -52,11 +54,12 @@ function makeApi (opts = {}) {
     ask: async () => '谢谢老板，收到了～',
     think: async () => { throw new Error('道谢不该用 api.think：那会在 DSH 里新建会话') },
     core: {
-      http: { body: async () => ({}), query: () => ({}) },
+      // 路由测试：把请求体 / query 挂在假 req 上，模拟 api.core.http.body / query。
+      http: { body: async (req) => (req && req.__body) || {}, query: (req) => (req && req.__query) || {} },
       personas: { current: () => '你是大肥鱼。' },
     },
   }
-  return { api, sent, commands, listeners, routes, tools, dir }
+  return { api, sent, commands, listeners, routes, tools, dir, config }
 }
 
 function emit (listeners, name, ...args) {
@@ -89,10 +92,11 @@ async function commandsConfirm (mod) {
   return mod.resolveApproval('', true)
 }
 
-test('挂在面板「表达」分组下（group + 老宿主兼容标记）', () => {
-  assert.equal(plugin.group, 'express', '模块定义要声明 group: express')
-  assert.equal(plugin.defaults.__panelGroup, 'express', '老宿主读不到 group，靠这个标记兜底')
-  // 不能写 tab: 'express' —— 那会被当成内置页 id 去找，找不到就变成单独一页
+test('不写宿主不认的 group / __panelGroup；落点由宿主导航决定（系统组）', () => {
+  // 宿主 client 的 navGroupOf 只认 tab id 和名字里的平台关键词，不读 def.group / defaults.__panelGroup；
+  // 本模块会落到「系统」组。不要为了让 README 好看而声明没人读的字段。
+  assert.equal(plugin.group, undefined)
+  assert.equal(plugin.defaults.__panelGroup, undefined)
   assert.equal(plugin.tab, undefined)
 })
 
@@ -786,4 +790,395 @@ test('/state 接口：数字、二维码状态、待确认、账本行都对得�
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/** 面板路由的假请求：默认同源 + 本机回环。 */
+const SAME_HEADERS = { host: '127.0.0.1:5099', origin: 'http://127.0.0.1:5099', 'sec-fetch-site': 'same-origin' }
+function panelReq (method, body, extra = {}) {
+  return {
+    method,
+    __body: body || {},
+    __query: extra.query || {},
+    headers: { ...SAME_HEADERS, ...(extra.headers || {}) },
+    socket: { remoteAddress: extra.remoteAddress || '127.0.0.1' },
+  }
+}
+
+test('面板写接口只收 POST；/approve 必须显式 id 和 true/false；跨站 / 非本机一律拒绝', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-route-'))
+  const { api, commands, routes } = makeApi({ dir, settings: { adminQQ: '20000002' } })
+  try {
+    const mod = await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    await commands.get('打赏').run('15', messages({}))
+    assert.equal(mod.pending().length, 1)
+    const approve = routes.get('/approve')
+    const beg = routes.get('/beg')
+    const stateRoute = routes.get('/state')
+
+    const getApprove = await approve(panelReq('GET', { id: '1', approve: true }))
+    assert.equal(getApprove.ok, false)
+    assert.match(getApprove.message, /POST/)
+    assert.equal(mod.pending().length, 1, 'GET 不能动待确认')
+
+    const noId = await approve(panelReq('POST', { approve: true }))
+    assert.equal(noId.ok, false)
+    assert.match(noId.message, /编号/)
+    assert.equal(mod.pending().length, 1, '不填编号不能确认最近一条')
+
+    const noFlag = await approve(panelReq('POST', { id: '1' }))
+    assert.equal(noFlag.ok, false)
+    assert.match(noFlag.message, /true|false/)
+    assert.equal(mod.pending().length, 1, '少传 approve 不能当批准')
+
+    const stringFlag = await approve(panelReq('POST', { id: '1', approve: 'true' }))
+    assert.equal(stringFlag.ok, false)
+    assert.equal(mod.pending().length, 1, '字符串 "true" 不是合法布尔')
+
+    const getBeg = await beg(panelReq('GET', {}))
+    assert.equal(getBeg.ok, false)
+    assert.match(getBeg.message, /POST/)
+
+    const crossState = await stateRoute(panelReq('GET', {}, { headers: { 'sec-fetch-site': 'cross-site' } }))
+    assert.equal(crossState.ok, false)
+    assert.match(crossState.message, /跨站/)
+    const crossBeg = await beg(panelReq('POST', {}, { headers: { 'sec-fetch-site': 'cross-site' } }))
+    assert.equal(crossBeg.ok, false)
+    const badOrigin = await stateRoute(panelReq('GET', {}, { headers: { origin: 'http://evil.example' } }))
+    assert.equal(badOrigin.ok, false)
+    assert.match(badOrigin.message, /跨站/)
+    const remote = await stateRoute(panelReq('GET', {}, { remoteAddress: '10.0.0.5' }))
+    assert.equal(remote.ok, false)
+    assert.match(remote.message, /本机/)
+
+    const state = await stateRoute(panelReq('GET'))
+    assert.equal(state.ok, true)
+    const rejected = await approve(panelReq('POST', { id: '1', approve: false }))
+    assert.equal(rejected.ok, true)
+    assert.equal(mod.pending().length, 0)
+    assert.equal(mod.status().accounts, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/state 和 /ledger 不返回管理员 QQ、原始打赏人 QQ、绝对路径', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-mask-'))
+  mkdirSync(join(dir, 'assets'), { recursive: true })
+  writeFileSync(join(dir, 'assets', 'qr.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+  const { api, commands, routes } = makeApi({ dir, settings: { qrImagePath: 'assets/qr.png', adminQQ: '20000002' } })
+  try {
+    const mod = await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    await commands.get('打赏').run('15', messages({}))
+    const direct = await mod.recordPayment({ amount: 5, note: '无昵称', chatId: 'group:' + GROUP, groupId: GROUP, payer: '30000003', payerName: '', source: '测试', byAdmin: true })
+    assert.equal(direct.ok, true)
+
+    const state = await routes.get('/state')(panelReq('GET'))
+    assert.ok(state.admins.length >= 2)
+    for (const admin of state.admins) {
+      assert.equal(/^\d+$/.test(admin), false, '管理员 QQ 不能原样返回')
+      assert.match(admin, /^\*{4}\d{4}$/)
+    }
+    assert.ok(!state.admins.includes('20000002'))
+    assert.ok(!state.admins.includes(OWNER))
+    assert.equal(state.ledgerFile, 'ledger.json')
+    assert.equal(state.approvalsFile, 'approvals.json')
+    assert.ok(!state.ledgerFile.includes('/') && !state.ledgerFile.includes('\\'))
+    assert.equal(state.qr.items.length, 1)
+    assert.equal(state.qr.items[0].path, 'assets/qr.png')
+    assert.equal(state.qr.items[0].file, undefined, '解析出的绝对路径不能进响应')
+    const pending = state.approvals.find((a) => a.id === '1')
+    assert.equal(pending.payer, '****0009')
+    const row = state.rows.find((r) => r.amount === 5)
+    assert.equal(row.payer, '****0003')
+
+    // summarizeLedger 的「全部」视图不带明细行，用这一笔自己的日期查明细
+    const ledger = await routes.get('/ledger')(panelReq('POST', { scope: row.date }))
+    assert.equal(ledger.ok, true)
+    const lrow = ledger.view.rows.find((r) => r.amount === 5)
+    assert.equal(lrow.payer, '****0003')
+    assert.doesNotMatch(JSON.stringify(ledger.view), /30000003|90000009/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('approvals.json 损坏：改名留档、禁止写回、明确报错', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-badappr-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const file = join(dataDir, 'approvals.json')
+  writeFileSync(file, '{"seq":7,"items":{"7":{"amount":8,"created":1700000000000}}', 'utf8')
+  const { api, commands, routes } = makeApi({ dir, settings: { adminQQ: '20000002' } })
+  try {
+    const mod = await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    assert.equal(mod.status().pending, 0)
+    assert.equal(mod.status().approvalsBroken, true)
+    assert.equal(existsSync(file), false, '坏文件要改名，不能留在原位置等被覆盖')
+    assert.ok(readdirSync(dataDir).some((name) => name.startsWith('approvals.json.corrupt-')))
+    const state = await routes.get('/state')(panelReq('GET'))
+    assert.equal(state.approvalsBroken, true)
+    const out = await commands.get('打赏').run('5', messages({}))
+    assert.match(out, /待确认文件损坏/)
+    assert.equal(mod.status().pending, 0)
+    assert.equal(existsSync(file), false, '损坏后禁止在原文件名重建')
+    assert.equal(await commands.get('确认').run('7', messages({ chatId: 'private:' + OWNER, userId: OWNER, groupId: '' })), '找不到编号 7 的待确认记录。')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('approvals.json 正常时仍能加载并确认', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-goodappr-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const created = 1_700_000_000_000
+  writeFileSync(join(dataDir, 'approvals.json'), JSON.stringify({
+    seq: 7,
+    items: {
+      7: {
+        id: '7', amount: 8, chatId: 'group:' + GROUP, groupId: GROUP, groupName: '群 ' + GROUP,
+        payer: STRANGER, payerName: '路人甲', requester: '路人甲', created,
+      },
+    },
+  }), 'utf8')
+  const { api, commands } = makeApi({ dir, settings: { adminQQ: '20000002' } })
+  try {
+    const mod = await plugin.setup(api, { now: () => created })
+    assert.equal(mod.pending().length, 1)
+    assert.equal(mod.status().approvalsBroken, false)
+    const text = await commands.get('确认').run('7', messages({ chatId: 'private:' + OWNER, userId: OWNER, groupId: '' }))
+    assert.match(text, /记上了 #7/)
+    assert.equal(mod.status().accounts, 1)
+    assert.equal(mod.pending().length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('同一条「我转了」走 message + activity 也只道谢一次', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-dedupe-'))
+  mkdirSync(join(dir, 'assets'), { recursive: true })
+  writeFileSync(join(dir, 'assets', 'qr.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+  const { api, commands, sent, listeners } = makeApi({
+    dir,
+    settings: { qrImagePath: 'assets/qr.png', thanksWindowSeconds: 600, cooldownSeconds: 0, dailyLimit: 0, adminQQ: '20000002' },
+  })
+  let asked = 0
+  api.ask = async () => { asked++; return '谢谢老板～' }
+  try {
+    await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    await commands.get('讨饭').run('', messages({}))
+    sent.length = 0
+    const claim = messages({ text: '我转了15', messageId: 'm-100' })
+    await Promise.all([
+      emit(listeners, 'message', claim),
+      emit(listeners, 'activity', { kind: 'in', chatId: 'group:' + GROUP, userId: STRANGER, nickname: '路人甲', text: '我转了15' }),
+    ])
+    await until(() => sent.some((s) => /谢谢老板/.test(s.text || '')))
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    assert.equal(asked, 1, '两条通道只该问一次模型')
+    assert.equal(sent.filter((s) => /谢谢老板/.test(s.text || '')).length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('道谢失败不自动重试；连点 /已打钱 只问一次模型，30 秒后可手动重试', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-thanksfail-'))
+  mkdirSync(join(dir, 'assets'), { recursive: true })
+  writeFileSync(join(dir, 'assets', 'qr.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+  const clock = { t: 1_700_000_000_000 }
+  const { api, commands, sent, listeners } = makeApi({
+    dir,
+    settings: { qrImagePath: 'assets/qr.png', thanksWindowSeconds: 600, cooldownSeconds: 0, dailyLimit: 0, adminQQ: '20000002' },
+  })
+  let asked = 0
+  api.ask = async () => { asked++; return '谢谢老板～' }
+  api.sendText = async () => null // 道谢发送失败；api.reply 走另一个函数，回复照样记下来
+  try {
+    await plugin.setup(api, { now: () => clock.t })
+    await commands.get('讨饭').run('', messages({}))
+    sent.length = 0
+    await emit(listeners, 'activity', { kind: 'in', chatId: 'group:' + GROUP, userId: STRANGER, text: '我转了' })
+    await until(() => asked === 1)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(asked, 1)
+    await emit(listeners, 'activity', { kind: 'in', chatId: 'group:' + GROUP, userId: STRANGER, text: '打了' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(asked, 1, '窗口内失败也不自动重试')
+    assert.equal(sent.filter((s) => /谢谢老板/.test(s.text || '')).length, 0)
+
+    clock.t += 31_000
+    for (let i = 0; i < 8; i++) await emit(listeners, 'message', messages({ text: '/已打钱' }))
+    assert.equal(asked, 2, '8 次手动重试只该问一次模型（其余在冷却内）')
+    assert.ok(sent.filter((s) => /道谢没发出去/.test(s.text || '')).length >= 1)
+    assert.ok(sent.filter((s) => /刚试过/.test(s.text || '')).length >= 7)
+
+    // 手动失败仍留着窗口：30 秒后还能再试
+    clock.t += 31_000
+    await emit(listeners, 'message', messages({ text: '/已打钱' }))
+    assert.equal(asked, 3, '冷却过后手动仍可重试')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('api.ask 超时：改用 thankFallbackText 兜底，不把聊天卡死', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-asktimeout-'))
+  const { api, commands, sent } = makeApi({ dir, settings: { adminQQ: '20000002', thankFallbackText: '谢谢你呀，收到了。' } })
+  try {
+    await plugin.setup(api, { now: () => 1_700_000_000_000, askTimeoutMs: 30 })
+    await commands.get('打赏').run('10', messages({}))
+    sent.length = 0
+    api.ask = () => new Promise(() => {})
+    const text = await commands.get('确认').run('1', messages({ chatId: 'private:' + OWNER, userId: OWNER, groupId: '' }))
+    assert.match(text, /已在群里道谢/)
+    const said = sent.find((s) => s.chatId === 'group:' + GROUP && s.text)
+    assert.equal(said.text, '谢谢你呀，收到了。')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('非主人管理员私聊能 /待确认 /确认 /不记；非管理员和群聊仍然不行', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-adminmsg-'))
+  const { api, commands, sent, listeners } = makeApi({ dir, settings: { adminQQ: '20000002', approvalThrottleSeconds: 0 } })
+  try {
+    const mod = await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    await commands.get('打赏').run('15', messages({}))
+    sent.length = 0
+    const adminDm = { chatId: 'private:20000002', userId: '20000002', groupId: '', nickname: '副管理员' }
+    const adminGroup = { chatId: 'group:' + GROUP, userId: '20000002', groupId: GROUP, nickname: '副管理员' }
+
+    const list = await emit(listeners, 'message', { ...adminDm, text: '/待确认' })
+    assert.equal(list[0], true, '非主人管理员的命令要接管')
+    assert.ok(sent.some((s) => /#1/.test(s.text || '')))
+
+    const groupConfirm = await emit(listeners, 'message', { ...adminGroup, text: '/确认 1' })
+    assert.equal(groupConfirm[0], true)
+    assert.ok(sent.some((s) => /私聊/.test(s.text || '')))
+    assert.equal(mod.pending().length, 1)
+
+    const strangerConfirm = await emit(listeners, 'message', { chatId: 'private:' + STRANGER, userId: STRANGER, groupId: '', text: '/确认 1' })
+    assert.equal(strangerConfirm[0], true)
+    assert.ok(sent.some((s) => /只有管理员/.test(s.text || '')))
+    assert.equal(mod.pending().length, 1)
+
+    const ok = await emit(listeners, 'message', { ...adminDm, text: '/确认 1' })
+    assert.equal(ok[0], true)
+    assert.equal(mod.pending().length, 0)
+    assert.equal(mod.status().accounts, 1)
+    assert.ok(sent.some((s) => s.chatId === 'group:' + GROUP && /谢谢老板/.test(s.text || '')))
+
+    // 第二笔：非主人管理员 /不记
+    await commands.get('打赏').run('6', messages({}))
+    assert.equal(mod.pending().length, 1)
+    const rejected = await emit(listeners, 'message', { ...adminDm, text: '/不记 2' })
+    assert.equal(rejected[0], true)
+    assert.equal(mod.pending().length, 0)
+    assert.equal(mod.status().accounts, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('dryRun：账本照记、回执写试运行、不谎称已在群里道谢；/讨饭 不回滚额度', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-dryrun-'))
+  mkdirSync(join(dir, 'assets'), { recursive: true })
+  writeFileSync(join(dir, 'assets', 'qr.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+  const { api, commands, sent } = makeApi({
+    dir,
+    settings: { qrImagePath: 'assets/qr.png', cooldownSeconds: 600, adminQQ: '20000002' },
+    config: { dryRun: true },
+  })
+  api.sendImage = async (chatId, file) => { sent.push({ chatId, image: file }); return null }
+  api.sendText = async (chatId, text) => { sent.push({ chatId, text }); return null }
+  try {
+    const mod = await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    const said = await commands.get('打赏').run('10', messages({ chatId: 'private:' + OWNER, userId: OWNER, groupId: '' }))
+    assert.match(said, /记下了 10\.00元/, 'dryRun 下账本照常写本地')
+    assert.match(said, /试运行/)
+    assert.doesNotMatch(said, /已在群里道谢/)
+    assert.equal(mod.status().accounts, 1)
+    assert.equal(sent.filter((s) => /谢谢|收到/.test(s.text || '')).length, 0, 'dryRun 不真发消息')
+
+    const first = await commands.get('讨饭').run('', messages({}))
+    assert.match(first, /试运行/)
+    assert.match(first, /收款码没有真发出去/)
+    assert.equal(sent.filter((s) => s.image).length, 0, 'dryRun 不真发图')
+    const manual = await commands.get('已打钱').run('', messages({}))
+    assert.match(manual, /试运行/, '手动道谢在 dryRun 下也不能谎称已发出')
+    assert.equal(sent.filter((s) => s.chatId === 'group:' + GROUP && /谢谢|收到/.test(s.text || '')).length, 0)
+    const second = await commands.get('讨饭').run('', messages({}))
+    assert.match(second, /刚伸过手了/, 'dryRun 的成功也要占冷却，不能回滚')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('qrCursor 6 小时后清理：旧聊天重新讨饭从第一张开始', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-qrprune-'))
+  mkdirSync(join(dir, 'assets'), { recursive: true })
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+  writeFileSync(join(dir, 'assets', 'wechat.png'), png)
+  writeFileSync(join(dir, 'assets', 'alipay.png'), png)
+  const clock = { t: 1_700_000_000_000 }
+  const { api, commands, sent } = makeApi({
+    dir,
+    settings: { qrImagePath: 'assets/wechat.png\nassets/alipay.png', cooldownSeconds: 0, dailyLimit: 0, thanksWindowSeconds: 0 },
+  })
+  try {
+    await plugin.setup(api, { now: () => clock.t })
+    const chatA = messages({})
+    await commands.get('讨饭').run('', chatA)
+    clock.t += 7 * 3600 * 1000
+    await commands.get('讨饭').run('', messages({ chatId: 'group:700002', groupId: '700002' }))
+    await commands.get('讨饭').run('', chatA)
+    const images = sent.filter((s) => s.image).map((s) => s.image.split(/[\\/]/).pop())
+    assert.deepEqual(images, ['wechat.png', 'wechat.png', 'wechat.png'], 'A 的收款码游标应在 6 小时后被 pruneState 清掉')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('新讨饭窗口不会被上一笔失败的记账道谢标记堵住', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'beg-new-window-'))
+  mkdirSync(join(dir, 'assets'), { recursive: true })
+  writeFileSync(join(dir, 'assets', 'qr.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+  const { api, commands, sent, listeners } = makeApi({
+    dir,
+    settings: { qrImagePath: 'assets/qr.png', thanksWindowSeconds: 600, cooldownSeconds: 0, dailyLimit: 0, adminQQ: '20000002' },
+  })
+  try {
+    const mod = await plugin.setup(api, { now: () => 1_700_000_000_000 })
+    // 记账后的道谢发送失败：给这个聊天留下 thanksTried，但此时还没有讨饭窗口
+    api.sendText = async () => null
+    const recorded = await mod.recordPayment({
+      amount: 5, chatId: 'group:' + GROUP, groupId: GROUP, payer: STRANGER, payerName: '路人甲', source: '测试', byAdmin: true,
+    })
+    assert.equal(recorded.ok, true)
+    // 新窗口 + 发送恢复：上一笔的失败标记不能把这次自动道谢堵住
+    let asked = 0
+    api.ask = async () => { asked++; return '谢谢老板～' }
+    api.sendText = async (chatId, text) => { sent.push({ chatId, text }); return { message_id: 'ok' } }
+    await commands.get('讨饭').run('', messages({}))
+    sent.length = 0
+    await emit(listeners, 'activity', { kind: 'in', chatId: 'group:' + GROUP, userId: STRANGER, nickname: '路人甲', text: '我转了' })
+    await until(() => sent.some((s) => /谢谢老板/.test(s.text || '')))
+    assert.equal(asked, 1, '新窗口应该重新允许自动道谢')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('版本号 1.0.1 在 module.json / 入口 / package.json / package-lock 一致', async () => {
+  const base = new URL('../', import.meta.url)
+  const manifest = JSON.parse(readFileSync(new URL('module.json', base), 'utf8'))
+  const pkg = JSON.parse(readFileSync(new URL('package.json', base), 'utf8'))
+  const lock = JSON.parse(readFileSync(new URL('package-lock.json', base), 'utf8'))
+  assert.equal(manifest.version, '1.0.1')
+  assert.equal(plugin.version, '1.0.1')
+  assert.equal(pkg.version, '1.0.1')
+  assert.equal(lock.version, '1.0.1')
+  assert.equal(lock.packages[''].version, '1.0.1')
 })

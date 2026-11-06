@@ -28,14 +28,14 @@
 // 数据都放 api.dataDir：ledger.json（账本）+ approvals.json（待确认）。
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import {
   CURRENCY_FALLBACK, formatLedgerBrief, formatLedgerLines, formatMoney, isoDay,
   createLedger, summarizeLedger,
 } from './lib/ledger.mjs'
 import { checkAmount, extractAmount, isPaymentClaim, sanitizeApprovals } from './lib/detect.mjs'
 
-const VERSION = '1.0.0'
+const VERSION = '1.0.1'
 const DEFAULT_THANKS = '有人打了钱过来，去谢谢人家，别太肉麻，一两句就够'
 const DEFAULT_FALLBACK = '谢谢你呀，收到了，我记着了。'
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
@@ -43,6 +43,24 @@ const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
 const PENDING_LIMIT = 20
 /** 待确认记录里备注最多留这么长。 */
 const NOTE_LIMIT = 40
+/** 道谢最小间隔：窗口内最多每 30 秒真的问一次模型，连发「已打钱」不会刷额度。 */
+const THANKS_MIN_INTERVAL_MS = 30_000
+/** api.ask 没有内建超时，挂死会把整个聊天永久卡在「正在道谢」。 */
+const ASK_TIMEOUT_MS = 8000
+/** message / activity 是同一条消息的两条通道：同一句在 10 秒内只算一次。 */
+const THANKS_DEDUPE_MS = 10_000
+/** 收款码游标按聊天记：6 小时没动就清掉，超过 200 个再按最旧淘汰。 */
+const QR_CURSOR_TTL_MS = 6 * 3600 * 1000
+const QR_CURSOR_LIMIT = 200
+
+/** 给任意 Promise 加一个超时；超时按失败处理，调用方决定要不要兜底。 */
+function withTimeout (promise, ms, label) {
+  let timer = null
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(label || '等待超时')), Math.max(1, Number(ms) || 1))
+  })
+  return Promise.race([promise, timeout]).finally(() => { if (timer) clearTimeout(timer) })
+}
 
 function boundedNumber (value, fallback, min, max) {
   const n = Number(value)
@@ -90,17 +108,11 @@ export default {
   api: 1,
   description: '群友提到打钱时伸手要饭并发收款码，记账要管理员私聊确认，确认后在原群道谢（有印象卡片时加「慷慨」）',
   panel: 'panel.js',
-  // 设置和面板作为「表达」分组下的子标签页「讨饭」，和语音、表情包、生图、翻唱、桌宠并列；
-  // 注意不是 tab: 'express'（那会塞进某个内置页内部，而且 express 不是内置页）。
-  group: 'express',
+  // 不写 group / __panelGroup：宿主不读这两个字段，用户模块的落点由导航逻辑决定
+  // （本模块会落在「系统」组）。总开关是普通设置项，在模块设置表单里。
 
   defaults: {
-    // 宿主版本较老时 /modules 不返回 group，面板靠这个标记把这一页挂到「表达」组下面。
-    __panelGroup: 'express',
-    // ⚠ enabled 必须留在 defaults 里：
-    //   · 宿主面板靠它给「表达 → 讨饭」这个标签页画开/关状态点；
-    //   · 也靠它在标签页标题栏放那个总开关（草稿态，底部保存设置生效）。
-    // 从 defaults 里拿掉，标签页的开关状态就没了。
+    // enabled 留在 defaults 里：宿主用它记录模块开关，设置表单里也能改。
     enabled: true,
     qrImagePath: '',
     senderName: '大肥鱼',
@@ -124,8 +136,7 @@ export default {
   },
 
   settings: [
-    // 宿主看到 defaults 里有 enabled，会把这一条从表单里滤掉、改成标签页标题栏上的总开关；
-    // 老宿主没有这个逻辑，就把它当普通设置项显示 —— 两边都有开关用。
+    // 总开关就是普通设置项：面板标题栏没有开关控件，用户在这里改、保存后生效。
     { key: 'enabled', label: '总开关', type: 'switch', hint: '关掉后命令、工具、面板接口都停，账本和待确认记录保留' },
     { key: 'qrImagePath', label: '收款码图片', type: 'textarea', hint: '一行一个路径，可以放多张（微信 / 支付宝各一张），按顺序轮着发。相对路径按扩展目录解析，也可以填绝对路径（带空格、带引号都能认）。留空或全都找不到时讨饭不可用' },
     { key: 'senderName', label: '署名', type: 'text', hint: '私聊管理员确认时显示的发送者昵称' },
@@ -152,8 +163,17 @@ export default {
   setup (api, dependencies = {}) {
     const log = api.log
     const nowMs = () => (typeof dependencies.now === 'function' ? dependencies.now() : Date.now())
+    // 测试可以调小；正常加载没有 dependencies，固定 8 秒。
+    const askTimeoutMs = Math.max(1, Number(dependencies.askTimeoutMs) || ASK_TIMEOUT_MS)
     let disposed = false
     api.onDispose(() => { disposed = true })
+
+    /** 宿主的全局配置（试运行 / 总开关）。热重载和测试里可能没有，按默认放行。 */
+    const hostCfg = () => {
+      try { return api.config() || {} } catch (error) { return {} }
+    }
+    const isDryRun = () => hostCfg().dryRun === true
+    const hostEnabled = () => hostCfg().enabled !== false
 
     // ---------- 设置 ----------
 
@@ -206,25 +226,49 @@ export default {
 
     const approvals = new Map()
     let approvalSeq = 0
+    // 和账本同一个口径：解析失败时坏文件改名留档，本次运行禁止写回。
+    // 否则下一次 saveApprovals() 会用「空列表 + 新记录」覆盖掉历史待确认。
+    let approvalsBroken = false
+
+    /** 坏了就改名留档，绝不覆盖。 */
+    function backupCorruptApprovals () {
+      try {
+        const to = approvalsFile + '.corrupt-' + Math.floor(Date.now() / 1000)
+        renameSync(approvalsFile, to)
+        log.error('坏待确认文件已备份为 ' + to + '，本次运行不写待确认记录，请修好后再重载模块')
+      } catch (error) {
+        log.error('坏待确认文件备份失败，为避免覆盖已停止写入：' + (error && error.message ? error.message : error))
+      }
+    }
 
     function loadApprovals () {
       approvals.clear()
       approvalSeq = 0
+      approvalsBroken = false
       if (!existsSync(approvalsFile)) return 0
       try {
         const parsed = JSON.parse(readFileSync(approvalsFile, 'utf8').replace(/^\uFEFF/, ''))
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('待确认文件里没有 { seq, items } 对象')
+        if (parsed.items !== undefined && (!parsed.items || typeof parsed.items !== 'object' || Array.isArray(parsed.items))) {
+          throw new Error('待确认文件里的 items 不是对象')
+        }
         const clean = sanitizeApprovals(parsed)
         for (const [id, rec] of Object.entries(clean.items)) approvals.set(id, rec)
         approvalSeq = clean.seq
         if (clean.dropped) log.warn('待确认记录里有 ' + clean.dropped + ' 条格式不对，已丢弃')
       } catch (error) {
-        // 和账本不同，待确认记录丢了可以重建（让群友再说一次），所以这里按空处理
-        log.error('待确认记录读取失败，按空处理：' + (error && error.message ? error.message : error))
+        approvalsBroken = true
+        log.error('待确认记录读取失败，已停止写入：' + (error && error.message ? error.message : error))
+        backupCorruptApprovals()
       }
       return approvals.size
     }
 
     function saveApprovals () {
+      if (approvalsBroken) {
+        log.error('待确认文件损坏已禁用写入，这次改动不会落盘')
+        return false
+      }
       const items = Object.fromEntries(approvals)
       return writeJsonAtomic(approvalsFile, { seq: approvalSeq, items }, log)
     }
@@ -236,8 +280,11 @@ export default {
       daily: new Map(), // chatId → { day, count }
       pendingThanks: new Map(), // chatId → 道谢窗口的到期毫秒时间
       thanksInflight: new Set(), // 正在道谢的聊天，防止同一条窗口触发两遍
+      thanksTried: new Set(), // chatId：本窗口已经自动试过（失败也算），防双通道 / 连发刷模型
+      lastThanksAt: new Map(), // chatId → 上次道谢尝试的毫秒时间，最小间隔用
+      thanksSeen: new Map(), // 去重键 → { at }：message / activity 双通道只算一次
       lastApproval: new Map(), // chatId → 上次报批的毫秒时间
-      qrCursor: new Map(), // chatId → 配了多张收款码时，下次该发第几张
+      qrCursor: new Map(), // chatId → { index, at }：多张收款码的下一张
     }
     // chatId → { uid, who, at }：这个聊天最后说话的人。只在 message / activity 里记，
     // 用来在群里给「打赏人」认人（模型传的 user_id 一律不采信）。
@@ -255,14 +302,32 @@ export default {
       }
     }
 
+    /** 关闭道谢窗口，顺手清掉这个窗口的限流痕迹。 */
+    function closeThanksWindow (chatId) {
+      const key = String(chatId || '')
+      state.pendingThanks.delete(key)
+      state.thanksTried.delete(key)
+      state.lastThanksAt.delete(key)
+    }
+
     function pruneState (now) {
       const c = conf()
       const today = isoDay(new Date(now))
       for (const [key, at] of [...state.lastBeg]) if (now - at >= c.cooldownSeconds * 1000) state.lastBeg.delete(key)
       for (const [key, rec] of [...state.daily]) if (rec.day !== today) state.daily.delete(key)
-      for (const [key, until] of [...state.pendingThanks]) if (now > until) state.pendingThanks.delete(key)
+      for (const [key, until] of [...state.pendingThanks]) if (now > until) closeThanksWindow(key)
+      // 窗口已经结束的标记顺手清掉（成功道谢时也会清，这里是兜底）
+      for (const key of [...state.thanksTried]) if (!state.pendingThanks.has(key)) state.thanksTried.delete(key)
+      for (const [key, at] of [...state.lastThanksAt]) if (now - at >= 10 * 60 * 1000) state.lastThanksAt.delete(key)
+      for (const [key, rec] of [...state.thanksSeen]) if (now - rec.at >= THANKS_DEDUPE_MS) state.thanksSeen.delete(key)
       const throttle = Math.max(1, c.approvalThrottleSeconds) * 1000
       for (const [key, at] of [...state.lastApproval]) if (now - at >= throttle) state.lastApproval.delete(key)
+      // 收款码游标也是按聊天长的：6 小时没动就清，超过上限再丢最旧的
+      for (const [key, rec] of [...state.qrCursor]) if (now - Number(rec.at || 0) >= QR_CURSOR_TTL_MS) state.qrCursor.delete(key)
+      if (state.qrCursor.size > QR_CURSOR_LIMIT) {
+        const oldest = [...state.qrCursor].sort((a, b) => Number(a[1].at || 0) - Number(b[1].at || 0))
+        for (const [key] of oldest.slice(0, state.qrCursor.size - QR_CURSOR_LIMIT)) state.qrCursor.delete(key)
+      }
     }
 
     /** 丢掉超时的待确认。 */
@@ -379,46 +444,122 @@ export default {
     }
 
     /**
-     * 让她自己说一句感谢，发回原来的聊天。成功才关窗口，失败留着下次再试。
+     * 让她自己说一句感谢，发回原来的聊天。成功才关窗口，失败留着让管理员/群友手动重试。
      * info：{ payerName, amount } —— 谁打的、打了多少，用来把场景说清楚。
-     * 返回 { ok, text } —— text 是实际发出去的话。
+     * 返回 { ok, text, delivered } —— text 是实际发出去的话，delivered 表示真的发出去了。
      */
     async function fireThanks (chatId, reason, info = {}) {
       const id = String(chatId || '').trim()
-      if (!id) return { ok: false, text: '' }
+      if (!id) return { ok: false, text: '', delivered: false }
       // 同一个聊天同时只允许一次在途：窗口要等成功才清，这中间另一条「打了」
       // 也会通过判断，没有这个集合就会道谢两遍。
-      if (state.thanksInflight.has(id)) return { ok: false, text: '' }
+      if (state.thanksInflight.has(id)) return { ok: false, text: '', delivered: false, busy: true }
       const c = conf()
+      const startedAt = nowMs()
+      const last = state.lastThanksAt.get(id)
+      if (last !== undefined && startedAt - last < THANKS_MIN_INTERVAL_MS) {
+        const left = Math.max(1, Math.ceil((THANKS_MIN_INTERVAL_MS - (startedAt - last)) / 1000))
+        return { ok: false, text: '', delivered: false, throttled: true, message: '刚试过，' + left + ' 秒后再试。' }
+      }
+      const cfg = hostCfg()
+      const silent = cfg.enabled === false || cfg.dryRun === true
+      // 无论成败，这轮窗口都算「已经试过」：自动通道不再重试，只有手动 /已打钱 能再来。
+      state.thanksTried.add(id)
+      state.lastThanksAt.set(id, startedAt)
       state.thanksInflight.add(id)
       let text = ''
       try {
-        text = sanitizeSayText(await generateThanks(c, id, info))
-      } catch (error) {
-        log.warn('生成道谢失败：' + (error && error.message ? error.message : error))
+        try {
+          text = sanitizeSayText(await generateThanks(c, id, info))
+        } catch (error) {
+          log.warn('生成道谢失败：' + (error && error.message ? error.message : error))
+        }
+        // 模型没在道谢（反问、清空、只剩标签）就用兜底文案：
+        // 宁可普通一点，也别让「已经道谢了」是句假话，更别把她一句「写啥啊」发到群里
+        if (!text || looksLikeNonAnswer(text)) {
+          if (text) log.info('道谢生成的不像话，改用兜底文案')
+          text = sanitizeSayText(c.thankFallbackText) || DEFAULT_FALLBACK
+        }
+        let sent = null
+        if (!silent) {
+          try {
+            sent = await api.sendText(id, text)
+          } catch (error) {
+            log.warn('道谢没发出去：' + (error && error.message ? error.message : error))
+          }
+        }
+        const delivered = Boolean(sent)
+        // 总开关关着 / 试运行时 sendSegments 返回 null：算模拟成功，但回执不能谎称真发了
+        if (!sent && !silent) return { ok: false, text: '', delivered: false }
+        closeThanksWindow(id)
+        // 道谢原文不写日志：日志有可能被贴到外面去
+        log.info('已道谢 chat=' + id + ' 原因=' + String(reason || '').slice(0, 40) + (delivered ? '' : '（试运行 / 总开关关着，没真发）'))
+        return { ok: true, text, delivered }
       } finally {
         state.thanksInflight.delete(id)
       }
-      // 模型没在道谢（反问、清空、只剩标签）就用兜底文案：
-      // 宁可普通一点，也别让「已经道谢了」是句假话，更别把她一句「写啥啊」发到群里
-      if (!text || looksLikeNonAnswer(text)) {
-        if (text) log.info('道谢生成的不像话，改用兜底文案')
-        text = sanitizeSayText(c.thankFallbackText) || DEFAULT_FALLBACK
+    }
+
+    /**
+     * 同一条消息会从 message 和 activity 两条通道各来一次。activity 没有 messageId，
+     * 所以有 id 时按 id 去重，另外始终用「聊天 + 人 + 文本」做 10 秒兜底。
+     */
+    function thanksDedupeKeys (ev) {
+      const chatId = String((ev && ev.chatId) || '')
+      const uid = String((ev && ev.userId) || '')
+      const text = String((ev && ev.text) || '').trim()
+      const mid = String((ev && (ev.messageId || ev.seq)) || '')
+      const keys = ['txt:' + chatId + ':' + uid + ':' + text]
+      if (mid) keys.push('id:' + chatId + ':' + mid)
+      return keys
+    }
+
+    function thanksSeenRecently (ev) {
+      const now = nowMs()
+      for (const key of thanksDedupeKeys(ev)) {
+        const rec = state.thanksSeen.get(key)
+        if (rec && now - rec.at < THANKS_DEDUPE_MS) return true
       }
-      let sent = null
-      try {
-        sent = await api.sendText(id, text)
-      } catch (error) {
-        log.warn('道谢没发出去：' + (error && error.message ? error.message : error))
+      return false
+    }
+
+    function markThanksSeen (ev) {
+      const now = nowMs()
+      for (const key of thanksDedupeKeys(ev)) state.thanksSeen.set(key, { at: now })
+      if (state.thanksSeen.size > 500) {
+        for (const [key, rec] of [...state.thanksSeen]) if (now - rec.at >= THANKS_DEDUPE_MS) state.thanksSeen.delete(key)
+        if (state.thanksSeen.size > 500) {
+          const oldest = [...state.thanksSeen].sort((a, b) => a[1].at - b[1].at)
+          for (const [key] of oldest.slice(0, state.thanksSeen.size - 500)) state.thanksSeen.delete(key)
+        }
       }
-      // 总开关关着 / 试运行时 sendSegments 返回 null，这时不能假装发出去了
-      const cfg = api.config()
-      const silent = cfg.enabled === false || cfg.dryRun === true
-      if (!sent && !silent) return { ok: false, text: '' }
-      state.pendingThanks.delete(id)
-      // 道谢原文不写日志：日志有可能被贴到外面去
-      log.info('已道谢 chat=' + id + ' 原因=' + String(reason || '').slice(0, 40) + (sent ? '' : '（试运行 / 总开关关着，没真发）'))
-      return { ok: true, text }
+    }
+
+    /**
+     * 窗口内的自动道谢：先同步占位（thanksTried），保证同一条消息的两条通道
+     * 和窗口内后续几句「打了」都只触发一次；失败也不自动重试，只留手动 /已打钱。
+     */
+    function maybeAutoThanks (ev) {
+      const chatId = String((ev && ev.chatId) || '')
+      if (!chatId) return false
+      if (state.thanksTried.has(chatId)) return false
+      if (thanksSeenRecently(ev)) return false
+      markThanksSeen(ev)
+      const last = state.lastThanksAt.get(chatId)
+      if (last !== undefined && nowMs() - last < THANKS_MIN_INTERVAL_MS) return false
+      state.thanksTried.add(chatId)
+      const info = {
+        payer: String((ev && ev.userId) || ''),
+        payerName: String((ev && ev.nickname) || ''),
+        amount: extractAmount(ev && ev.text),
+      }
+      // 只读监听里不能 await：道谢丢后台跑，别卡住消息处理
+      Promise.resolve().then(() =>
+        fireThanks(chatId, '窗口内检测到打款说法', info)
+      ).catch((error) => {
+        log.warn('自动道谢失败：' + (error && error.message ? error.message : error))
+      })
+      return true
     }
 
     /**
@@ -458,7 +599,9 @@ export default {
       // 用户消息也要给足信息：只说「写一句吧」，模型只会回「写啥」
       const ask = scene + '在这个群里说一句谢谢吧，一两句就行。'
       if (typeof dependencies.generate === 'function') return String((await dependencies.generate(system, ask)) || '').trim()
-      const reply = await api.ask({ system, text: ask, maxTokens: 220 })
+      // api.ask 在核心里没有 timeout：模型挂死会把整个聊天永久卡在「正在道谢」。
+      // 超时按失败处理，fireThanks 会改用 thankFallbackText 兜底。
+      const reply = await withTimeout(api.ask({ system, text: ask, maxTokens: 220 }), askTimeoutMs, '生成道谢超时')
       return String(reply || '').trim()
     }
 
@@ -534,7 +677,11 @@ export default {
 
     // ---------- 记账 ----------
 
-    /** 记一笔并落账。 */
+    /**
+     * 记一笔并落账。
+     * dryRun 是「不往外发消息」，账本是本地数据，照常记录；回执里会明确写「试运行」，
+     * 不再声称「已在群里道谢」。
+     */
     function writeEntry ({ amount, note, chatId, groupId, payer, payerName, source }) {
       if (!conf().ledgerEnabled) return { ok: false, message: '记账功能已关闭。' }
       if (ledger.broken) return { ok: false, message: '账本文件损坏已停止写入，先修好 ledger.json 再重载模块。' }
@@ -548,7 +695,7 @@ export default {
       const notes = []
       if (sayThanks) {
         const thanks = await fireThanks(entry.chatId, reason || '记账生效', { payerName: entry.payerName, amount: entry.amount })
-        if (thanks.ok) notes.push('已在群里道谢')
+        if (thanks.ok) notes.push(thanks.delivered ? '已在群里道谢' : '试运行：账本照常记录，道谢没有真发出去')
       }
       const linked = await linkImpressionCard(entry, reason)
       if (linked) notes.push(linked)
@@ -565,6 +712,7 @@ export default {
       // 群友触发 → 先问管理员；管理员自己触发就直接记
       if (c.requireApproval && !byAdmin) {
         if (!c.admins.size) return { ok: false, message: '还没配置管理员 QQ 号，记账审批用不了。' }
+        if (approvalsBroken) return { ok: false, message: '待确认文件损坏已停止写入，先修好 approvals.json 再重载模块。' }
         const now = nowMs()
         const last = state.lastApproval.get(chatId)
         const throttleMs = c.approvalThrottleSeconds * 1000
@@ -581,7 +729,9 @@ export default {
         return {
           ok: true,
           pending: rec,
-          message: '收到 ' + formatMoney(checked.value, c.currency) + ' 的说法，已经报给管理员了，等他点头才算数（编号 ' + rec.id + '）。',
+          message: isDryRun()
+            ? '试运行：收到 ' + formatMoney(checked.value, c.currency) + ' 的说法（本地待确认，私聊不会真发出，编号 ' + rec.id + '）。'
+            : '收到 ' + formatMoney(checked.value, c.currency) + ' 的说法，已经报给管理员了，等他点头才算数（编号 ' + rec.id + '）。',
         }
       }
 
@@ -598,6 +748,7 @@ export default {
     // ---------- 待确认 ----------
 
     async function createApproval ({ amount, note, chatId, groupId, payer, payerName }) {
+      if (approvalsBroken) return null
       purgeApprovals()
       const c = conf()
       approvalSeq += 1
@@ -647,7 +798,10 @@ export default {
       const ids = [...conf().admins]
       if (!ids.length) return false
       let delivered = 0
+      // 试运行不真发私聊，但审批链要能继续跑：按「已经送到」处理，记录留在本地待确认。
+      const dry = isDryRun()
       for (const uid of ids) {
+        if (dry) { delivered += 1; continue }
         try {
           // sendText 发失败只返回 null / false，不抛异常；不判就会把「没送到」当「送到了」
           const ok = await api.sendText('private:' + uid, text)
@@ -680,7 +834,11 @@ export default {
       }
       if (!approve) {
         approvals.delete(rec.id)
-        saveApprovals()
+        if (!saveApprovals()) {
+          // 删不掉就先留在内存里，别让管理员以为已经处理完了
+          approvals.set(rec.id, rec)
+          return { ok: false, text: '待确认记录删不掉（写盘失败），这笔还在。' }
+        }
         log.info('记账被拒 #' + rec.id)
         return { ok: true, text: '好，#' + rec.id + ' 那笔 ' + formatMoney(rec.amount, c.currency) + ' 不记了。' }
       }
@@ -731,7 +889,8 @@ export default {
       }
       // 配了好几张就轮着发：第一次发第一张，第二次第二张，避免每次都刷屏刷同样的图
       const cursorKey = target
-      const index = (state.qrCursor.get(cursorKey) || 0) % qr.files.length
+      const cursor = state.qrCursor.get(cursorKey)
+      const index = ((cursor && Number(cursor.index)) || 0) % qr.files.length
       const chosen = qr.files[index]
       const now = nowMs()
       const last = state.lastBeg.get(target)
@@ -751,14 +910,21 @@ export default {
       state.lastBeg.set(target, now)
       state.daily.set(target, { day: today, count: count + 1 })
 
+      // 试运行 / 宿主总开关关着的时候 sendImage 返回 null 是预期行为：
+      // 当成「模拟发送」，照常占冷却 / 每日额度 / 道谢窗口，不能回滚。
+      const preview = isDryRun()
+      const globalOff = !hostEnabled()
+      const silent = preview || globalOff
       let sent = null
-      try {
-        sent = await api.sendImage(target, chosen.file)
-      } catch (error) {
-        log.error('发送收款码失败：' + (error && error.message ? error.message : error))
-        sent = null
+      if (!silent) {
+        try {
+          sent = await api.sendImage(target, chosen.file)
+        } catch (error) {
+          log.error('发送收款码失败：' + (error && error.message ? error.message : error))
+          sent = null
+        }
       }
-      if (!sent) {
+      if (!sent && !silent) {
         // 发送失败：把占位退回去，别让一次失败白占冷却和每日额度
         if (prevLast === undefined) state.lastBeg.delete(target)
         else state.lastBeg.set(target, prevLast)
@@ -766,12 +932,23 @@ export default {
         else state.daily.set(target, prevDaily)
         return { ok: false, message: '收款码没发出去。' }
       }
-      // 发成功了才推进到下一张
-      if (qr.files.length > 1) state.qrCursor.set(cursorKey, (index + 1) % qr.files.length)
-      if (c.thanksWindowSeconds > 0) state.pendingThanks.set(target, now + c.thanksWindowSeconds * 1000)
+      // 真发成功（或模拟成功）才推进到下一张
+      if (qr.files.length > 1) state.qrCursor.set(cursorKey, { index: (index + 1) % qr.files.length, at: now })
+      if (c.thanksWindowSeconds > 0) {
+        // 新窗口从干净状态开始：上一笔无关的失败道谢（比如记账后网关抽风）
+        // 不该把新窗口也标成「已试过」，否则这个窗口的自动道谢会被永久跳过。
+        state.thanksTried.delete(target)
+        state.lastThanksAt.delete(target)
+        state.pendingThanks.set(target, now + c.thanksWindowSeconds * 1000)
+      }
       pruneState(now)
-      log.info('已发送收款码 chat=' + target + ' 今日第 ' + (count + 1) + ' 次' + (qr.files.length > 1 ? '（第 ' + (index + 1) + '/' + qr.files.length + ' 张）' : ''))
-      let message = '已经伸手要过了，收款码发出去了（今天第 ' + (count + 1) + ' 次）'
+      log.info('已发送收款码 chat=' + target + ' 今日第 ' + (count + 1) + ' 次' + (qr.files.length > 1 ? '（第 ' + (index + 1) + '/' + qr.files.length + ' 张）' : '') + (sent ? '' : '（未真发）'))
+      const prefix = preview
+        ? '试运行：收款码没有真发出去'
+        : globalOff
+          ? '插件总开关关着：收款码没有真发出去'
+          : '已经伸手要过了，收款码发出去了'
+      let message = prefix + '（今天第 ' + (count + 1) + ' 次）'
       // 部分图片没找到时顺口提一句，别让主人以为全都发了
       if (qr.missing.length) message += '，但另有 ' + qr.missing.length + ' 张找不到：' + qr.missing[0]
       return { ok: true, message: message + '。' }
@@ -825,6 +1002,28 @@ export default {
       })
     }
 
+    /** 待确认列表文案：主人命令和非主人管理员私聊共用。 */
+    function pendingText () {
+      const c = conf()
+      purgeApprovals()
+      const list = [...approvals.values()].sort((a, b) => a.created - b.created)
+      if (!list.length) return '没有待确认的记账。'
+      const lines = ['待确认的记账：']
+      for (const rec of list.slice(0, PENDING_LIMIT)) {
+        lines.push('  #' + rec.id + ' ' + formatMoney(rec.amount, c.currency) + ' — ' + (rec.groupName || rec.chatId || '未知') + ' / ' + rec.requester)
+      }
+      if (list.length > PENDING_LIMIT) lines.push('  ……另有 ' + (list.length - PENDING_LIMIT) + ' 条')
+      return lines.join('\n')
+    }
+
+    /** /已打钱 的回复：节流时把剩余秒数说清楚，别只说「失败了」。 */
+    async function thanksByCommand (chatId) {
+      const out = await fireThanks(chatId, '手动确认已打钱')
+      if (out.ok) return out.delivered ? '收到，让她去道谢了。' : '试运行：道谢没有真发出去。'
+      if (out.throttled && out.message) return out.message
+      return '道谢没发出去，稍后再试。'
+    }
+
     // ---------- 命令（主人） ----------
 
     api.command({
@@ -851,8 +1050,7 @@ export default {
         if (c.adminOnly && !isAdmin(ctx.userId)) return '这个动作只有管理员能做。'
         if (c.thanksWindowSeconds <= 0) return '自动道谢关着，先把「道谢窗口」设成大于 0 秒。'
         if (!state.pendingThanks.has(ctx.chatId)) return '现在没有待道谢的讨饭记录，先 /讨饭 或者等窗口内有人打钱。'
-        const out = await fireThanks(ctx.chatId, '手动确认已打钱')
-        return out.ok ? '收到，让她去道谢了。' : '道谢没发出去，稍后再试。'
+        return thanksByCommand(ctx.chatId)
       },
     })
 
@@ -896,15 +1094,7 @@ export default {
         if (!isAdmin(ctx.userId)) return '只有管理员能看。'
         // 列表里有别的群的群名、昵称和金额，群聊里发等于公开
         if (ctx.isGroup) return '待确认列表请私聊查。'
-        purgeApprovals()
-        const list = [...approvals.values()].sort((a, b) => a.created - b.created)
-        if (!list.length) return '没有待确认的记账。'
-        const lines = ['待确认的记账：']
-        for (const rec of list.slice(0, PENDING_LIMIT)) {
-          lines.push('  #' + rec.id + ' ' + formatMoney(rec.amount, c.currency) + ' — ' + (rec.groupName || rec.chatId || '未知') + ' / ' + rec.requester)
-        }
-        if (list.length > PENDING_LIMIT) lines.push('  ……另有 ' + (list.length - PENDING_LIMIT) + ' 条')
-        return lines.join('\n')
+        return pendingText()
       },
     })
 
@@ -943,11 +1133,12 @@ export default {
       run: async () => helpText(),
     })
 
-    // ---------- 群友的命令：由 message 事件接管 ----------
+    // ---------- 群友 / 非主人管理员的命令：由 message 事件接管 ----------
     //
-    // Aurabot 的 api.command 只认主人，群友发 /讨饭、/打赏、/收款 会被当成普通聊天。
-    // 这里接管这几条（返回 true = 这条不再交给她），并且只认完整命令，不做模糊匹配。
-    const GUEST_RE = /^[/／]\s*(讨饭|要饭|已打钱|打了|打赏|记账|收款|账本|收入|讨饭帮助|讨饭用法)(?![A-Za-z0-9_])([\s\S]*)$/
+    // Aurabot 的 api.command 只认主人，群友发 /讨饭、/打赏、/收款 会被当成普通聊天；
+    // 名单里的非主人管理员同样收不到命令分发，所以 /确认、/不记、/待确认 也在这里接管。
+    // 返回 true = 这条不再交给她；只认完整命令，不做模糊匹配。
+    const GUEST_RE = /^[/／]\s*(讨饭帮助|讨饭用法|beg_help|beg_for_money|beg|讨饭|要饭|已打钱|打了|paid|打赏|记账|record_payment|record|收款|账本|收入|check_ledger|ledger|待确认|待审|pending|确认|同意|approve|不记|拒绝|忽略|reject)(?![A-Za-z0-9_])([\s\S]*)$/
 
     api.on('message', async (msg) => {
       if (disposed) return false
@@ -964,16 +1155,9 @@ export default {
         const chatId = String(msg.chatId)
         const until = state.pendingThanks.get(chatId)
         if (until !== undefined) {
-          if (nowMs() > until) state.pendingThanks.delete(chatId)
-          else if (isPaymentClaim(text)) {
-            // 这窗口里说「转了」的是 msg 里的人；顺手把他说的金额挖出来，道谢时带上
-            const info = { payer: String(msg.userId || ''), payerName: String(msg.nickname || ''), amount: extractAmount(text) }
-            Promise.resolve().then(() =>
-              fireThanks(chatId, '窗口内检测到打款说法', info)
-            ).catch((error) => {
-              log.warn('自动道谢失败：' + (error && error.message ? error.message : error))
-            })
-          }
+          if (nowMs() > until) closeThanksWindow(chatId)
+          // maybeAutoThanks 自己负责双通道去重和「本窗口只试一次」。
+          else if (isPaymentClaim(text)) maybeAutoThanks(msg)
         }
       }
       if (text[0] !== '/' && text[0] !== '／') return false
@@ -983,28 +1167,39 @@ export default {
       if (!match || !c.enabled) return false
       const word = match[1]
       const arg = String(match[2] || '').trim()
+      const isGroup = isGroupChat(msg.chatId)
       try {
-        if (word === '讨饭帮助' || word === '讨饭用法') {
+        if (word === '讨饭帮助' || word === '讨饭用法' || word === 'beg_help') {
           await api.reply(msg, helpText())
-        } else if (word === '讨饭' || word === '要饭') {
+        } else if (word === '讨饭' || word === '要饭' || word === 'beg' || word === 'beg_for_money') {
           if (c.adminOnly && !isAdmin(msg.userId)) await api.reply(msg, '这个动作只有管理员能做。')
           else await api.reply(msg, (await doBeg(msg.chatId)).message)
-        } else if (word === '已打钱' || word === '打了') {
+        } else if (word === '已打钱' || word === '打了' || word === 'paid') {
           if (c.adminOnly && !isAdmin(msg.userId)) await api.reply(msg, '这个动作只有管理员能做。')
           else if (c.thanksWindowSeconds <= 0) await api.reply(msg, '自动道谢关着。')
           else if (!state.pendingThanks.has(msg.chatId)) await api.reply(msg, '现在没有待道谢的讨饭记录。')
-          else {
-            const out = await fireThanks(msg.chatId, '群友手动确认已打钱')
-            await api.reply(msg, out.ok ? '收到，让她去道谢了。' : '道谢没发出去，稍后再试。')
-          }
-        } else if (word === '打赏' || word === '记账') {
+          else await api.reply(msg, await thanksByCommand(msg.chatId))
+        } else if (word === '打赏' || word === '记账' || word === 'record' || word === 'record_payment') {
           const out = await recordByCommand(arg, commandContext(msg), '群友命令', false)
           await api.reply(msg, out.message)
-        } else if (word === '收款' || word === '账本' || word === '收入') {
+        } else if (word === '收款' || word === '账本' || word === '收入' || word === 'ledger' || word === 'check_ledger') {
           if (c.adminOnly && !isAdmin(msg.userId)) await api.reply(msg, '这个动作只有管理员能做。')
-          else if (c.adminOnly && isGroupChat(msg.chatId)) await api.reply(msg, '营收明细请私聊查。')
+          else if (c.adminOnly && isGroup) await api.reply(msg, '营收明细请私聊查。')
           else if (!c.ledgerEnabled) await api.reply(msg, '记账功能已关闭。')
           else await api.reply(msg, formatLedgerLines(ledgerView(arg)))
+        } else if (word === '待确认' || word === '待审' || word === 'pending') {
+          if (!isAdmin(msg.userId)) await api.reply(msg, '只有管理员能看。')
+          // 列表里有别的群的群名、昵称和金额，群聊里发等于公开
+          else if (isGroup) await api.reply(msg, '待确认列表请私聊查。')
+          else await api.reply(msg, pendingText())
+        } else if (word === '确认' || word === '同意' || word === 'approve') {
+          if (!isAdmin(msg.userId)) await api.reply(msg, '只有管理员能确认。')
+          else if (isGroup) await api.reply(msg, '确认请在私聊里说，别在群里。')
+          else await api.reply(msg, (await resolveApproval(arg, true)).text)
+        } else if (word === '不记' || word === '拒绝' || word === '忽略' || word === 'reject') {
+          if (!isAdmin(msg.userId)) await api.reply(msg, '只有管理员能确认。')
+          else if (isGroup) await api.reply(msg, '确认请在私聊里说，别在群里。')
+          else await api.reply(msg, (await resolveApproval(arg, false)).text)
         }
       } catch (error) {
         log.warn('处理讨饭命令出错：' + (error && error.message ? error.message : error))
@@ -1017,6 +1212,7 @@ export default {
     //
     // 用 activity 而不是 message：activity 收的是所有进出的消息（只看不改），
     // 不受「她回不回这条」影响；群友一句「转了」未必会交给她。
+    // 和 message 通道共用 maybeAutoThanks，同一句只触发一次。
     api.on('activity', (a) => {
       if (disposed) return
       if (!a || a.kind !== 'in' || !a.chatId) return
@@ -1028,16 +1224,9 @@ export default {
       const chatId = String(a.chatId)
       const until = state.pendingThanks.get(chatId)
       if (until === undefined) return
-      const now = nowMs()
-      if (now > until) { state.pendingThanks.delete(chatId); return }
+      if (nowMs() > until) { closeThanksWindow(chatId); return }
       if (!isPaymentClaim(a.text)) return
-      const info = { payer: String(a.userId || ''), payerName: String(a.nickname || ''), amount: extractAmount(a.text) }
-      // 只读监听里不能 await：道谢丢后台跑，别卡住消息处理
-      Promise.resolve().then(() =>
-        fireThanks(chatId, '窗口内检测到打款说法', info)
-      ).catch((error) => {
-        log.warn('自动道谢失败：' + (error && error.message ? error.message : error))
-      })
+      maybeAutoThanks(a)
     })
 
     // ---------- 工具 ----------
@@ -1125,8 +1314,72 @@ export default {
     })
 
     // ---------- 面板接口 ----------
+    //
+    // 这些接口能确认记账、往群里发消息、读出营收，所以：
+    //   · 所有路由先过同源闸（照 history-vault / meme-wiki 的 crossSite 写法）；
+    //   · /state、/ledger 再限本机回环，响应里不出现管理员 QQ 和绝对路径；
+    //   · 有副作用的路由强制 POST，/approve 必须显式 id + 明确的 true/false。
+    const LOOPBACK_RE = /^(?:::1|::ffff:127(?:\.\d{1,3}){3}|127(?:\.\d{1,3}){3})$/
 
-    api.route('/state', async () => {
+    function crossSite (req) {
+      const site = String(req?.headers?.['sec-fetch-site'] || '')
+      if (site === 'cross-site') return { ok: false, message: '不允许跨站调用' }
+      const origin = String(req?.headers?.origin || '')
+      if (origin) {
+        try {
+          if (new URL(origin).host !== String(req?.headers?.host || '')) return { ok: false, message: '不允许跨站调用' }
+        } catch (error) {
+          return { ok: false, message: '来源不合法' }
+        }
+      }
+      return null
+    }
+
+    /** 面板接口只接受本机回环：DNS rebinding / 任意本机网页不能读账本。 */
+    function panelGuard (req) {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
+      const addr = String(req?.socket?.remoteAddress || '')
+      // 没有 socket 的是宿主内部调用 / 测试；真实 HTTP 请求一定有。
+      if (addr && !LOOPBACK_RE.test(addr)) return { ok: false, message: '面板接口只接受本机请求' }
+      return null
+    }
+
+    /** QQ 号脱敏：面板只需要知道「有几个管理员」，不需要真号。 */
+    function maskQQ (raw) {
+      const s = String(raw || '').trim()
+      if (!/^\d+$/.test(s)) return ''
+      return '****' + s.slice(-4)
+    }
+
+    /** 账本行里的打赏人：有昵称用昵称，没有昵称才用脱敏后的 QQ。 */
+    function payerLabel (row) {
+      const name = String((row && row.payerName) || '').trim()
+      if (name) return name
+      const payer = String((row && row.payer) || '').trim()
+      return /^\d+$/.test(payer) ? maskQQ(payer) : payer
+    }
+
+    /** /ledger 返回的视图也脱敏，别把原始 QQ 再带出去一次。 */
+    function publicLedgerView (view) {
+      if (!view) return null
+      return {
+        ...view,
+        rows: (view.rows || []).map((row) => ({
+          date: row.date,
+          time: row.time,
+          amount: row.amount,
+          note: row.note,
+          group: row.groupId ? '群 ' + row.groupId : groupDisplayName(row.chatId),
+          payer: payerLabel(row),
+          source: row.source,
+        })),
+      }
+    }
+
+    api.route('/state', async (req) => {
+      const blocked = panelGuard(req)
+      if (blocked) return blocked
       const c = conf()
       const qr = resolveQrs()
       purgeApprovals()
@@ -1140,8 +1393,10 @@ export default {
         ledgerEnabled: c.ledgerEnabled,
         currency: c.currency,
         ledgerBroken: ledger.broken,
-        ledgerFile,
-        approvalsFile,
+        approvalsBroken,
+        // 只给文件名：面板要显示「记在哪」，但绝对路径没有必要进 HTTP 响应
+        ledgerFile: basename(ledgerFile),
+        approvalsFile: basename(approvalsFile),
         accounts: ledger.count(),
         grandTotal: view.grand,
         today: { date: today, count: view.count, total: view.total },
@@ -1156,13 +1411,15 @@ export default {
           path: c.qrImagePath,
           available: qr.ok,
           message: qr.ok ? '' : qr.reason,
-          // 一张一行，配了几张就列几张：面板按这个显示「几张可用 / 哪张找不到」
-          items: qr.files.map((one) => ({ path: one.path, file: one.file })),
+          // 一张一行，配了几张就列几张：面板按这个显示「几张可用 / 哪张找不到」。
+          // 只回配置里的路径，不回解析出来的绝对路径。
+          items: qr.files.map((one) => ({ path: one.path })),
           missing: qr.missing,
           count: qr.files.length,
         },
         adminOnly: c.adminOnly,
-        admins: [...c.admins],
+        // 管理员 QQ 脱敏：面板不需要真号，泄露给 DNS-rebinding / 本机进程没有意义
+        admins: [...c.admins].map(maskQQ),
         requireApproval: c.requireApproval,
         thanksWindowSeconds: c.thanksWindowSeconds,
         linkImpressionCard: c.linkImpressionCard,
@@ -1174,7 +1431,7 @@ export default {
           note: rec.note,
           groupName: rec.groupName,
           requester: rec.requester,
-          payer: rec.payer,
+          payer: maskQQ(rec.payer),
           created: rec.created,
         })),
         rows: ledger.all().slice(-200).reverse().map((row) => ({
@@ -1183,28 +1440,47 @@ export default {
           amount: row.amount,
           note: row.note,
           group: row.groupId ? '群 ' + row.groupId : groupDisplayName(row.chatId),
-          payer: row.payerName || row.payer,
+          payer: payerLabel(row),
           source: row.source,
         })),
       }
     })
 
     api.route('/approve', async (req) => {
+      const blocked = panelGuard(req)
+      if (blocked) return blocked
+      // 写操作必须 POST：GET /approve 会被浏览器预取 / <img> / DNS-rebinding 直接打穿。
+      if (req?.method !== 'POST') return { ok: false, message: '只支持 POST' }
       if (!conf().enabled) return { ok: false, message: '讨饭插件已关闭。' }
       const body = await api.core.http.body(req)
-      const out = await resolveApproval(String(body.id || ''), body.approve !== false)
+      const id = String((body && body.id) || '').trim()
+      // 不填编号就取最近一条 = 一个裸请求批准最近一笔，这里必须显式指定。
+      if (!id) return { ok: false, message: '要指定待确认编号，不能确认「最近一条」。' }
+      // 不能用 `!== false` 兜底：少传字段会被当成批准。
+      if ((body && body.approve) !== true && (body && body.approve) !== false) {
+        return { ok: false, message: 'approve 必须显式写 true 或 false。' }
+      }
+      const out = await resolveApproval(id, body.approve)
       return { ok: out.ok, message: out.text }
     })
 
     api.route('/ledger', async (req) => {
+      const blocked = panelGuard(req)
+      if (blocked) return blocked
       if (!conf().enabled) return { ok: false, message: '讨饭插件已关闭。' }
-      const body = await api.core.http.body(req)
-      const view = ledgerView(String(body.scope || '').trim())
+      const body = req?.method === 'POST'
+        ? await api.core.http.body(req)
+        : (api.core.http.query(req) || {})
+      const view = ledgerView(String((body && body.scope) || '').trim())
       if (!view) return { ok: false, message: '看不懂这个范围。' }
-      return { ok: true, view, text: formatLedgerLines(view) }
+      return { ok: true, view: publicLedgerView(view), text: formatLedgerLines(view) }
     })
 
-    api.route('/beg', async () => {
+    api.route('/beg', async (req) => {
+      const blocked = panelGuard(req)
+      if (blocked) return blocked
+      // 有副作用（发图、占冷却 / 每日额度、开道谢窗口）：只收 POST。
+      if (req?.method !== 'POST') return { ok: false, message: '只支持 POST' }
       const c = conf()
       if (!c.enabled) return { ok: false, message: '讨饭插件已关闭。' }
       if (!c.ownerQQ) return { ok: false, message: '还没配置主人 QQ，不知道往哪发。' }
@@ -1223,7 +1499,7 @@ export default {
       ledger: () => ledger.all(),
       view: (scope) => ledgerView(scope),
       text: (scope) => formatLedgerLines(ledgerView(scope)),
-      status: () => ({ enabled: conf().enabled, accounts: ledger.count(), pending: approvals.size, broken: ledger.broken }),
+      status: () => ({ enabled: conf().enabled, accounts: ledger.count(), pending: approvals.size, broken: ledger.broken, approvalsBroken }),
       dispose: () => { disposed = true },
     }
   },

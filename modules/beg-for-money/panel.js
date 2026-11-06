@@ -1,7 +1,7 @@
 // 讨饭面板：今日 / 累计数字、收款码状态、待确认记账（可直接确认 / 不记）、最近账本。
 // 这段代码是函数体，由 Aurabot 面板在受限作用域里执行，最后要 return 一个 React 组件。
 // React / h / ui / call / settings / draftSettings / setSettings / save / toast 全部来自参数，不能 import。
-// 接口：/state（GET）、/approve（POST { id, approve }）、/beg（GET）。
+// 接口：/state（GET）、/approve（POST { id, approve: true/false }）、/beg（POST {}）。
 
 const { useState, useEffect, useCallback } = React
 
@@ -77,8 +77,8 @@ return function Panel (props) {
   if (loading && !state) return h(ui.Empty, { icon: '⏳', text: '读取账本…' })
   if (!state) return h('div', { className: 'ab-note err' }, error || '读不到账本。')
 
-  // 总开关在标签页标题栏（宿主按 defaults.enabled 自动渲染），面板里不再放一个，免得同一个地方两个开关。
-  // 这里只用它的状态给一句说明。
+  // 总开关是普通设置项，在模块设置表单里改（面板标题栏没有开关控件）。
+  // 面板里不再放第二个开关，只用它的状态给一句说明。
   const enabled = state.enabled !== false
 
   const unit = state.currency || '元'
@@ -149,18 +149,25 @@ return function Panel (props) {
   children.push(h(ui.Card, {
     key: 'head',
     title: '打赏',
-    desc: (state.ledgerEnabled ? '账本记在 ' : '记账已关闭；文件在 ') + String(state.ledgerFile || ''),
+    desc: state.ledgerEnabled
+      ? '账本记在模块数据目录（' + String(state.ledgerFile || 'ledger.json') + '）'
+      : '记账已关闭；文件在模块数据目录（' + String(state.ledgerFile || 'ledger.json') + '）',
     right: h(ui.Btn, { small: true, disabled: Boolean(busy), title: '刷新', onClick: load }, busy === 'load' ? '刷新中…' : '↻'),
   }))
 
   if (!enabled) {
     children.push(h('div', { key: 'off', className: 'ab-note warn' },
-      '讨饭关着（标签页标题栏的开关）：命令、她自己的工具、自动道谢都不会动。账本和待确认记录还在，打开就恢复。'))
+      '讨饭关着（在设置表单里打开「总开关」）：命令、她自己的工具、自动道谢都不会动。账本和待确认记录还在，打开就恢复。'))
   }
 
   if (state.ledgerBroken) {
     children.push(h('div', { key: 'broken', className: 'ab-note err' },
       '账本文件损坏，已停止写入（避免用空账本覆盖历史）。先修好 ledger.json，再在「扩展」页重新加载这个模块。'))
+  }
+
+  if (state.approvalsBroken) {
+    children.push(h('div', { key: 'approvals-broken', className: 'ab-note err' },
+      '待确认文件损坏，已停止写入（避免用空列表覆盖历史）。修好 approvals.json 后再重新加载这个模块。'))
   }
 
   children.push(h('div', { key: 'metrics', className: 'ab-flex' },
@@ -200,7 +207,7 @@ return function Panel (props) {
     h('div', { className: 'ab-flex', style: { marginTop: 8 } },
       h(ui.Btn, {
         disabled: Boolean(busy) || !state.enabled,
-        onClick: function () { act('/beg', undefined, 'beg') },
+        onClick: function () { act('/beg', {}, 'beg') },
       }, busy === 'beg' ? '发送中…' : '往主人私聊试发一张'),
       h(ui.Btn, { disabled: Boolean(busy), onClick: load }, '刷新'))))
 

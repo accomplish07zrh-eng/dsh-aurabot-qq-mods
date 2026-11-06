@@ -1,7 +1,7 @@
 {
   "id": "beg-for-money",
   "name": "讨饭",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "群友提到打钱时伸手要饭并发收款码，记账要管理员私聊确认，确认后在原群道谢（有印象卡片时加「慷慨」）",
   "category": "social",
   "tags": [

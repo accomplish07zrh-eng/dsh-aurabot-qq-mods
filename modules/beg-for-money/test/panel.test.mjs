@@ -17,7 +17,8 @@ const STATE = {
   ledgerEnabled: true,
   currency: '元',
   ledgerBroken: false,
-  ledgerFile: 'C:/data/ledger.json',
+  approvalsBroken: false,
+  ledgerFile: 'ledger.json',
   accounts: 3,
   grandTotal: 42.5,
   today: { date: '2026-11-05', count: 2, total: 27.5 },
@@ -119,18 +120,18 @@ test('首屏还没拿到 state 时显示加载中，不显示空账本', () => {
   assert.deepEqual(h.calls, [], '渲染过程里不该发请求')
 })
 
-test('面板里不重复渲染总开关（它在标签页标题栏上）', async () => {
+test('面板里不重复渲染总开关（它在模块设置表单里）', async () => {
   const h = load()
   const tree = await h.mount()
   assert.equal(find(tree, (n) => n.type === 'Switch'), undefined, '面板里不该再有第二个总开关')
 })
 
-test('总开关关着时给出说明，并指向标签页上的开关', async () => {
+test('总开关关着时给出说明，并指向设置表单里的开关', async () => {
   const h = load({ '/state': () => ({ ...JSON.parse(JSON.stringify(STATE)), enabled: false }) })
   const tree = await h.mount()
   const body = text(tree)
   assert.match(body, /讨饭关着/)
-  assert.match(body, /标签页标题栏的开关/)
+  assert.match(body, /设置表单里打开「总开关」/)
   assert.match(body, /账本和待确认记录还在/)
 })
 
@@ -140,7 +141,7 @@ test('总开关开着时不显示「关着」的提示', async () => {
   assert.doesNotMatch(text(tree), /讨饭关着/)
 })
 
-test('defaults 里保留 enabled：标签页的开/关状态点和标题栏开关都靠它', () => {
+test('defaults 里保留 enabled：模块开关记录和设置表单都用它', () => {
   assert.equal(pluginDefaults.enabled, true)
 })
 
@@ -251,6 +252,13 @@ test('账本损坏时顶部给出明确警告', async () => {
   assert.match(text(tree), /ledger\.json/)
 })
 
+test('待确认文件损坏时也给出明确警告，不继续假装能确认', async () => {
+  const h = load({ '/state': () => ({ ...JSON.parse(JSON.stringify(STATE)), approvalsBroken: true }) })
+  const tree = await h.mount()
+  assert.match(text(tree), /待确认文件损坏/)
+  assert.match(text(tree), /approvals\.json/)
+})
+
 test('收款码不可用时说清楚原因', async () => {
   const h = load({
     '/state': () => ({ ...JSON.parse(JSON.stringify(STATE)), qr: { configured: true, path: 'assets/qr.png', available: false, message: '收款码图片找不到，发不了。' } }),
@@ -280,6 +288,17 @@ test('总开关关掉时「试发收款码」按钮不可点', async () => {
   const btn = button(tree, '往主人私聊试发一张')
   assert.ok(btn, '缺少试发按钮')
   assert.equal(btn.props.disabled, true)
+})
+
+test('点「往主人私聊试发一张」用 POST {} 调 /beg（路由只收 POST）', async () => {
+  const h = load()
+  const tree = await h.mount()
+  button(tree, '往主人私聊试发一张').props.onClick()
+  await tick()
+  await tick()
+  const beg = h.calls.find((c) => c.path === '/beg')
+  assert.ok(beg, '应该调用 /beg')
+  assert.deepEqual(beg.body, {}, '没有 body 的 call 会被宿主发成 GET，必须带 {} 触发 POST')
 })
 
 test('接口报错时显示错误并提示，不白屏', async () => {
