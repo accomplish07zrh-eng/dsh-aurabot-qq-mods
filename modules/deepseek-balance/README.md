@@ -86,11 +86,38 @@ API Key 在 [platform.deepseek.com](https://platform.deepseek.com/) 的「API ke
 
 ```
 deepseek-balance/
-├── module.json   模块信息、能力声明
-├── index.mjs     全部实现（只有一个文件）
-├── README.md     这份说明
-└── LICENSE       MIT
+├── module.json          模块信息、能力声明
+├── index.mjs            入口：只做定义和接线
+├── lib/balance.mjs      触发词、格式化、请求、缓存
+├── test/balance.test.mjs 测试（不进发布包）
+├── README.md            这份说明
+└── LICENSE              MIT
 ```
+
+## 测试
+
+测试不打真网络：`fetch` 全部注入，时钟也注入，所以缓存过期这类用例不用真的等。
+
+```sh
+# 只跑这个模块的测试
+node --test "modules/deepseek-balance/test/*.test.mjs"
+
+# 和 CI 一样，带上插件环境跑全部模块测试
+AURABOT_PLUGIN_DIR=<dsh-aurabot-qq 工作副本> \
+  node --import ./scripts/plugin-env.mjs --test "modules/*/test/*.test.mjs"
+```
+
+覆盖的内容：
+
+| 分组 | 覆盖点 |
+|---|---|
+| 触发词 | 默认值、多种分隔符、大小写、首尾空格、不命中 |
+| 格式化 | 单/多币种、赠送与充值都为 0、余额不足、空数组、脏数据兜底 |
+| 鉴权 | 未填 Key 不发请求、`401`、`403` |
+| 错误码 | `500` 带服务端原因、非 JSON 错误页、200 非 JSON、超时、连不上 |
+| 回退 | `/v1` 撞 `404`/`405` 退回根路径；用户自己填的中转地址不回退 |
+| 缓存 | 30 秒内复用、过期重查、失败不缓存、开关关闭清空、实例之间互不串 |
+| 模块接线 | 开关默认关、命中才接管、群友开关的鉴权、失败写警告日志 |
 
 ## 版本
 
