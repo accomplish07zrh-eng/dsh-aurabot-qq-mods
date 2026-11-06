@@ -669,7 +669,14 @@ export default {
       // 物理：面板设置优先（主人可调），没设过就用素材包里的，再没有就用内置默认。
       // 客户端 main.js 是 { ...DEFAULT_PHYSICS, ...pack.physics }，所以这里发什么它就吃什么。
       const s = api.settings()
-      const physics = physicsFromSettings(s)
+      const packPhysics = (raw && typeof raw.physics === 'object') ? raw.physics : {}
+      const fromSettings = physicsFromSettings(s)
+      const physics = {}
+      for (const k of Object.keys(fromSettings)) {
+        // 面板明确设过的键用面板值；没设过的键让素材包的同名项顶上（再没有就沿用内置默认）
+        const touched = s[`physics${k[0].toUpperCase()}${k.slice(1)}`] !== undefined
+        physics[k] = (touched || packPhysics[k] === undefined) ? fromSettings[k] : packPhysics[k]
+      }
       return { name, animations: { idle: poolOf('idle'), speak: poolOf('speak'), click: poolOf('click') }, weights, events, physics, position: petPosition() }
     }
 
