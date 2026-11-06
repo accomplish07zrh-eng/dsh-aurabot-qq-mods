@@ -15,6 +15,17 @@ const NO_RENDERER = {
   async avatarDataUri () { return '' },
 }
 
+const OK_RENDERER = {
+  async renderCard ({ fileBase }) { return { ok: true, file: join(tmpdir(), fileBase + '.png'), bytes: 1 } },
+  async sharp () { return {} },
+  async avatarDataUri () { return '' },
+}
+
+const TODAY = (() => {
+  const d = new Date()
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+})()
+
 function makeApi (opts) {
   const o = opts || {}
   const dir = mkdtempSync(join(tmpdir(), 'impression-index-'))
@@ -28,7 +39,15 @@ function makeApi (opts) {
   const replies = []
   const disposers = []
   const asks = []
+  const every = []
   const rows = o.rows || []
+  const sendTextResult = o.sendTextResult === undefined ? true : o.sendTextResult
+  const sendImageResult = o.sendImageResult === undefined ? true : o.sendImageResult
+  const ownerTurn = (sid) => {
+    if (typeof o.turnSendersAllOwner === 'function') return o.turnSendersAllOwner(sid)
+    if (o.ownerSessions === undefined) return ['s1', 'owner-1', 'owner'].includes(String(sid))
+    return Array.isArray(o.ownerSessions) ? o.ownerSessions.includes(String(sid)) : o.ownerSessions.has(String(sid))
+  }
   const api = {
     log: { info () {}, warn () {}, debug () {}, error () {} },
     dataDir: (...parts) => join(dir, ...parts),
@@ -39,8 +58,9 @@ function makeApi (opts) {
       hub: {
         chatLogOf: (day) => rows.filter((r) => String(r.day || '') === day || !r.day),
         sessions: () => ({}),
-        sendText: async (chatId, text) => { sends.push({ chatId, text }); return true },
-        sendImage: async () => { throw new Error('测试里没有图片通道') },
+        turnSendersAllOwner: (sid) => ownerTurn(sid),
+        sendText: async (chatId, text) => { sends.push({ chatId, text }); return sendTextResult },
+        sendImage: async (chatId, file) => { sends.push({ chatId, file }); return sendImageResult },
         deliver: async () => true,
       },
       http: {
@@ -56,18 +76,18 @@ function makeApi (opts) {
     defineTool: (tool) => tool,
     rule: (fn) => rules.push(fn),
     context: (fn) => contexts.push(fn),
-    every: () => {},
+    every: (ms, fn) => { every.push({ ms, fn }); return () => {} },
     route: (path, handler) => routes.set(path, handler),
     ask: async (args) => { asks.push(args); return o.answer || '{"total":7,"scores":{"familiarity":8,"luck":-1},"description":"一个测试印象"}' },
-    sendText: async (chatId, text) => { sends.push({ chatId, text }); return true },
-    sendImage: async (chatId, file) => { sends.push({ chatId, file }); return true },
+    sendText: async (chatId, text) => { sends.push({ chatId, text }); return sendTextResult },
+    sendImage: async (chatId, file) => { sends.push({ chatId, file }); return sendImageResult },
     reply: async (msg, text) => { replies.push({ chatId: msg.chatId, text }); return true },
     isOwner: (userId) => String(userId) === '10000',
     onebot: async (action) => {
       if (action === 'get_group_member_list') return [{ user_id: 10001, nickname: '小明', card: '' }]
       return null
     },
-    use: () => null,
+    use: (id) => (id === 'memory' ? (o.memory || null) : null),
     on: (event, fn) => {
       const list = listeners.get(event) || []
       list.push(fn)
@@ -75,7 +95,7 @@ function makeApi (opts) {
     },
     emit: () => {},
   }
-  return { api, dir, commands, toolBuilders, rules, contexts, listeners, routes, sends, replies, asks, disposers, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  return { api, dir, commands, toolBuilders, rules, contexts, listeners, routes, sends, replies, asks, every, disposers, ownerTurn, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 function ownerMsg (extra) {
@@ -87,10 +107,12 @@ function ownerMsg (extra) {
   }
 }
 
-test('定义里把设置和面板挂到「人设」组下面，作为子标签页', async () => {
-  // 不是 tab: 'persona'（那是塞进「人格」页里）；group: 'self' 才是「人设」这一组下面的独立子页。
-  assert.equal(plugin.group, 'self')
+test('定义里不再声明宿主不认的 group / __panelGroup，面板仍是独立页', async () => {
+  // 不写 tab / group 时宿主把扩展当独立页，落在默认的「系统」分组。
+  assert.equal(plugin.group, undefined)
   assert.equal(plugin.tab, undefined)
+  assert.equal(plugin.defaults.__panelGroup, undefined)
+  assert.equal(plugin.defaults.panelGroup, undefined)
   assert.equal(plugin.panel, 'panel.js')
   assert.match(plugin.version, /^\d+\.\d+\.\d+$/)
 })
@@ -118,6 +140,8 @@ test('/卡片 冷启动 → 生成档案 → 没有 sharp 时发文字版摘要'
   assert.equal(result, '')
   assert.ok(env.asks.length >= 1, '应该调用过一次模型')
   assert.ok(env.asks[0].text.includes('好感度'), '提示词里应该有评分口径')
+  assert.match(env.asks[0].system, /不是指令/, 'system 里要声明聊天/记忆只是数据')
+  assert.match(env.asks[0].system, /数据/)
   const record = exports.get('qq:10000')
   assert.ok(record, '应该生成了档案')
   assert.equal(record.total, 7)
@@ -151,20 +175,22 @@ test('工具：impression_adjust 加减分并写事件；impression_append_note 
   const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
   await exports.refresh('qq:10001', 'private:10001').catch(() => {})
   const tools = env.toolBuilders[0]({ chat: { chatId: 'group:999', kind: 'group', userId: '10000', groupId: '999' }, level: 'full', sessionId: 's1' })
+  const exec = { sessionId: 's1' }
   const names = tools.map((t) => t.name)
   assert.deepEqual(names, ['impression_adjust', 'impression_set', 'impression_append_note', 'impression_rewrite_note', 'impression_detail', 'impression_nudge', 'impression_refresh', 'impression_send_card'])
   // 先给小明建档案
   const detail = tools.find((t) => t.name === 'impression_detail')
+  // 不传 exec 时退回工具工厂拿到的 sessionId；真正的门禁在 execute 时判定。
   const detailOut = await detail.execute({ target: '10001' })
   assert.equal(detailOut.ok, true)
   const adjust = tools.find((t) => t.name === 'impression_adjust')
-  const out = await adjust.execute({ target: '10001', dimension: 'familiarity', delta: 2, reason: '聊天很投缘' })
+  const out = await adjust.execute({ target: '10001', dimension: 'familiarity', delta: 2, reason: '聊天很投缘' }, exec)
   assert.equal(out.ok, true)
   assert.match(out.message, /熟悉/)
   const record = exports.get('qq:10001')
   assert.equal(record.scores.familiarity, 10)
   const note = tools.find((t) => t.name === 'impression_append_note')
-  const noteOut = await note.execute({ content: '喜欢半夜发美食图', target: '10001' })
+  const noteOut = await note.execute({ content: '喜欢半夜发美食图', target: '10001' }, exec)
   assert.equal(noteOut.ok, true)
   assert.match(exports.get('qq:10001').description, /半夜发美食图/)
   assert.ok(exports.list().length >= 1)
@@ -382,15 +408,34 @@ test('/印象卡片 帮助 不是查一个叫「帮助」的人', async () => {
   env.cleanup()
 })
 
-test('主动微调：关着时什么都不做；开着时只微调已有档案的人', async () => {
+test('主动微调：关着时什么都不做', async () => {
   const env = makeApi({ rows: [
-    { chatId: 'group:999', uid: '10001', who: '小明', text: '在吗', t: Date.now() - 60000 },
-    { chatId: 'group:999', uid: '10002', who: '阿二', text: '在', t: Date.now() - 30000 },
+    { day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '在吗', t: Date.now() - 60000 },
+    { day: TODAY, chatId: 'group:999', uid: '10002', who: '阿二', text: '在', t: Date.now() - 30000 },
   ] })
-  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
-  const talk = env.toolBuilders[0]({ chat: { chatId: 'group:999', kind: 'group', userId: '10000', groupId: '999' }, level: 'full', sessionId: 's' })
+  await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await env.every[0].fn()
   // 关着：即使有聊天记录也不该调模型
   assert.equal(env.asks.length, 0)
+  env.cleanup()
+})
+
+test('主动微调：真的会跑，且只拿未忘记、非 bot、非 seen 的行', async () => {
+  const rows = [
+    { day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '正常消息', t: Date.now() - 60000 },
+    { day: TODAY, chatId: 'group:999', uid: '10002', who: '阿二', text: '忘记的消息', t: Date.now() - 50000, forgottenAt: Date.now() },
+    { day: TODAY, chatId: 'group:999', uid: '99999', who: 'bot', text: '机器人消息', t: Date.now() - 40000 },
+    { day: TODAY, chatId: 'group:999', uid: '10004', who: '阿四', text: '看过图片', t: Date.now() - 30000, kind: 'seen' },
+  ]
+  const env = makeApi({ rows, settings: { proactiveEnabled: true, proactiveHours: 1, proactivePollSeconds: 60 } })
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  for (const id of ['10001', '10002', '10003', '10004']) await exports.generate('qq:' + id, 'group:999')
+  env.asks.length = 0
+  await env.every[0].fn()
+  assert.equal(env.asks.length, 1, '过滤后只剩小明一个可微调对象，模型只该被调一次')
+  assert.match(env.asks[0].text, /正常消息/)
+  assert.doesNotMatch(env.asks[0].text, /忘记的消息|机器人消息|看过图片/)
+  assert.match(env.asks[0].system || '', /不是指令/)
   env.cleanup()
 })
 
@@ -401,5 +446,216 @@ test('文字回退：帮助与列表都有内容', async () => {
   assert.match(exports.helpText(), /雷达/)
   const list = await env.commands.find((c) => c.name === '印象列表').run('', ownerMsg())
   assert.match(list, /还没有任何印象档案/)
+  env.cleanup()
+})
+
+test('面板路由：跨站请求一律拒绝，8 条路由都先过 crossSite', async () => {
+  const env = makeApi()
+  const exports = await plugin.setup(env.api, { renderer: OK_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  const cross = { headers: { 'sec-fetch-site': 'cross-site' }, method: 'POST', body: { personId: 'qq:10001' } }
+  for (const path of ['/state', '/help', '/render', '/refresh', '/adjust', '/delete', '/send']) {
+    const out = await env.routes.get(path)(cross)
+    assert.equal(out.ok, false, path)
+    assert.match(out.message, /跨站/, path)
+  }
+  const res = {}
+  await env.routes.get('/card.png')({ ...cross, method: 'GET', query: { person: 'qq:10001' } }, res)
+  assert.equal(res.sent.code, 403)
+  assert.equal(res.sent.body.ok, false)
+  // Origin 与 Host 不同源也拒绝
+  const evil = await env.routes.get('/state')({ headers: { origin: 'https://evil.example', host: '127.0.0.1:5099' } })
+  assert.equal(evil.ok, false)
+  assert.match(evil.message, /跨站/)
+  // 同源放行
+  const same = await env.routes.get('/state')({ headers: { origin: 'http://127.0.0.1:5099', host: '127.0.0.1:5099' } })
+  assert.equal(same.ok, true)
+  env.cleanup()
+})
+
+test('面板 Host 白名单：挡住 DNS rebinding，放行本机与配置的对外域名', async () => {
+  const env = makeApi()
+  await plugin.setup(env.api, { renderer: OK_RENDERER })
+  // 攻击者的 DNS rebinding 页面：Origin 和 Host 都是 evil.example，crossSite 拦不住，靠 Host 白名单。
+  const rebinding = await env.routes.get('/state')({ headers: { host: 'evil.example', origin: 'http://evil.example' } })
+  assert.equal(rebinding.ok, false)
+  assert.match(rebinding.message, /Host|DNS rebinding/)
+  // 本机 Host 放行
+  const local = await env.routes.get('/state')({ headers: { host: '127.0.0.1:5099', origin: 'http://127.0.0.1:5099' } })
+  assert.equal(local.ok, true)
+  env.cleanup()
+
+  // 反代部署填了 security.publicHostname 时，该域名放行。
+  const pub = makeApi({ config: { security: { publicHostname: 'panel.example.com' } } })
+  await plugin.setup(pub.api, { renderer: OK_RENDERER })
+  const publicHost = await pub.routes.get('/state')({ headers: { host: 'panel.example.com', origin: 'https://panel.example.com' } })
+  assert.equal(publicHost.ok, true)
+  pub.cleanup()
+})
+
+test('写接口必须 POST：GET 不改档案、不刷新、不发送', async () => {
+  const env = makeApi({ rows: [{ day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '在吗', t: Date.now() - 1000 }] })
+  const exports = await plugin.setup(env.api, { renderer: OK_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  const before = JSON.stringify(exports.get('qq:10001'))
+  const asksBefore = env.asks.length
+  const sendsBefore = env.sends.length
+  for (const path of ['/render', '/refresh', '/adjust', '/delete', '/send']) {
+    const out = await env.routes.get(path)({ method: 'GET', body: { personId: 'qq:10001', value: 1 } })
+    assert.equal(out.ok, false, path)
+    assert.match(out.message, /POST/, path)
+  }
+  assert.equal(JSON.stringify(exports.get('qq:10001')), before)
+  assert.equal(env.asks.length, asksBefore)
+  assert.equal(env.sends.length, sendsBefore)
+  const ok = await env.routes.get('/adjust')({ method: 'POST', body: { personId: 'qq:10001', dimension: 'total', value: 1, mode: 'add' } })
+  assert.equal(ok.ok, true)
+  assert.equal(exports.get('qq:10001').total, 8)
+  env.cleanup()
+})
+
+test('记忆检索：社交场景传 where 且只查关于对方、排除主人；主人私聊可看全域', async () => {
+  const calls = []
+  const memory = {
+    recall: (query, options) => { calls.push({ query, options }); return [{ it: { text: '一条旧记忆' } }] },
+    profiles: () => [{ qq: '10001', text: '主人私聊里的秘密档案' }],
+    addEvent: () => {},
+  }
+  const env = makeApi({ memory })
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  assert.ok(calls.length >= 1)
+  for (const call of calls) {
+    assert.equal(call.options.where, 'group:999')
+    assert.equal(call.options.onlyAbout, '10001')
+    assert.equal(call.options.requireAbout, true)
+    assert.equal(call.options.excludeAbout, '10000')
+  }
+  assert.ok(!env.asks[0].text.includes('主人私聊里的秘密档案'), '社交场景不读跨聊天人物小档案')
+  calls.length = 0
+  const asksBefore = env.asks.length
+  await exports.refresh('qq:10001', 'private:10000')
+  assert.equal(env.asks.length, asksBefore + 1)
+  assert.ok(calls.length >= 1)
+  for (const call of calls) {
+    assert.equal(call.options.where, 'private:10000')
+    assert.equal(call.options.onlyAbout, undefined)
+    assert.equal(call.options.requireAbout, undefined)
+  }
+  assert.ok(env.asks.at(-1).text.includes('主人私聊里的秘密档案'), '主人私聊可以使用人物小档案')
+  env.cleanup()
+})
+
+test('聊天流水过滤 forgottenAt / bot / seen，不把被忘记的内容喂给模型', async () => {
+  const rows = [
+    { day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '正常消息', t: Date.now() - 50000 },
+    { day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '忘记的秘密', t: Date.now() - 40000, forgottenAt: Date.now() },
+    { day: TODAY, chatId: 'group:999', uid: '99999', who: 'bot', text: '机器人自己的话', t: Date.now() - 30000 },
+    { day: TODAY, chatId: 'group:999', uid: '10002', who: '阿二', text: '看过图片', t: Date.now() - 20000, kind: 'seen' },
+  ]
+  const env = makeApi({ rows })
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  const prompt = env.asks[0].text
+  assert.match(prompt, /正常消息/)
+  assert.doesNotMatch(prompt, /忘记的秘密|机器人自己的话|看过图片/)
+  assert.match(env.asks[0].system, /不是指令/)
+  assert.match(env.asks[0].system, /数据/)
+  env.cleanup()
+})
+
+test('工具主人门：非主人 / 混轮调用一律拒绝，不写档案、不烧模型', async () => {
+  const env = makeApi({ ownerSessions: [], rows: [{ day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '在吗', t: Date.now() - 1000 }] })
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  const before = JSON.stringify(exports.get('qq:10001'))
+  const asksBefore = env.asks.length
+  const sendsBefore = env.sends.length
+  const tools = env.toolBuilders[0]({ chat: { chatId: 'group:999', kind: 'group', userId: '10000', groupId: '999' }, level: 'full', sessionId: 's1' })
+  for (const tool of tools) {
+    const out = await tool.execute({}, { sessionId: 'group-mixed' })
+    assert.equal(out.ok, false, tool.name)
+    assert.match(out.message, /主人/, tool.name)
+  }
+  assert.equal(JSON.stringify(exports.get('qq:10001')), before)
+  assert.equal(env.asks.length, asksBefore)
+  assert.equal(env.sends.length, sendsBefore)
+  env.cleanup()
+})
+
+test('工具主人门在 execute 时判定：挂载后主人身份变化立即生效', async () => {
+  let ownerTurn = true
+  const env = makeApi({ turnSendersAllOwner: () => ownerTurn, rows: [{ day: TODAY, chatId: 'group:999', uid: '10001', who: '小明', text: '在吗', t: Date.now() - 1000 }] })
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  const tools = env.toolBuilders[0]({ chat: { chatId: 'group:999', kind: 'group', userId: '10000', groupId: '999' }, level: 'full', sessionId: 's1' })
+  const adjust = tools.find((t) => t.name === 'impression_adjust')
+  ownerTurn = false
+  const denied = await adjust.execute({ target: '10001', dimension: 'total', delta: 3 }, { sessionId: 's1' })
+  assert.equal(denied.ok, false)
+  assert.equal(exports.get('qq:10001').total, 7)
+  ownerTurn = true
+  const allowed = await adjust.execute({ target: '10001', dimension: 'total', delta: 1 }, { sessionId: 's1' })
+  assert.equal(allowed.ok, true)
+  assert.equal(exports.get('qq:10001').total, 8)
+  env.cleanup()
+})
+
+test('sendImage 返回 null 时 /卡片、/send、impression_send_card 都报失败', async () => {
+  const env = makeApi({ sendImageResult: null })
+  const exports = await plugin.setup(env.api, { renderer: OK_RENDERER })
+  await exports.generate('qq:10000', 'group:999')
+  await exports.generate('qq:10001', 'group:999')
+  const text = await env.commands.find((c) => c.name === '卡片').run('', ownerMsg())
+  assert.match(text, /没发出去/)
+  const sendRes = await env.routes.get('/send')({ method: 'POST', body: { personId: 'qq:10001', chatId: 'group:999' } })
+  assert.equal(sendRes.ok, false)
+  assert.match(sendRes.message, /没发出去/)
+  const tools = env.toolBuilders[0]({ chat: { chatId: 'group:999', kind: 'group', userId: '10000', groupId: '999' }, level: 'full', sessionId: 's1' })
+  const out = await tools.find((t) => t.name === 'impression_send_card').execute({ target: '10001' }, { sessionId: 's1' })
+  assert.equal(out.ok, false)
+  assert.match(out.message, /没发出去/)
+  env.cleanup()
+})
+
+test('渲染失败且文字版也发不出去时 /卡片 不报成功', async () => {
+  const env = makeApi({ sendTextResult: null })
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await exports.generate('qq:10000', 'group:999')
+  const text = await env.commands.find((c) => c.name === '卡片').run('', ownerMsg())
+  assert.match(text, /没发出去/)
+  assert.doesNotMatch(text, /文字版卡片/)
+  env.cleanup()
+})
+
+test('工具写笔记会清洗控制字符 / 零宽字符并封顶', async () => {
+  const env = makeApi()
+  const exports = await plugin.setup(env.api, { renderer: NO_RENDERER })
+  await exports.generate('qq:10001', 'group:999')
+  const tools = env.toolBuilders[0]({ chat: { chatId: 'group:999', kind: 'group', userId: '10000', groupId: '999' }, level: 'full', sessionId: 's1' })
+  const rewrite = tools.find((t) => t.name === 'impression_rewrite_note')
+  const out = await rewrite.execute({ target: '10001', content: '好\u0000的\u200b\n\n\n\n' + 'x'.repeat(5000) }, { sessionId: 's1' })
+  assert.equal(out.ok, true)
+  const description = exports.get('qq:10001').description
+  assert.ok(!description.includes('\u0000'))
+  assert.ok(!description.includes('\u200b'))
+  assert.ok(description.length <= 4000, '笔记长度要封顶')
+  env.cleanup()
+})
+
+test('GET /card.png?person=__proto__ 不会沿原型链返回或污染 Object.prototype', async () => {
+  const env = makeApi()
+  await plugin.setup(env.api, { renderer: OK_RENDERER })
+  for (const person of ['__proto__', 'constructor', 'toString']) {
+    const res = {}
+    await env.routes.get('/card.png')({ query: { person } }, res)
+    assert.equal(res.sent.body.ok, false, person)
+    assert.match(res.sent.body.message, /还没有/, person)
+  }
+  assert.equal(({}).total, undefined, 'Object.prototype 不能被写脏')
+  assert.equal(Object.prototype.scores, undefined)
+  const adjustRes = await env.routes.get('/adjust')({ method: 'POST', body: { personId: '__proto__', dimension: 'total', value: 1, mode: 'add' } })
+  assert.equal(adjustRes.ok, false)
+  assert.equal(Object.prototype.total, undefined)
   env.cleanup()
 })

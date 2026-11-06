@@ -19,7 +19,7 @@ import {
   DEFAULT_SCORE, DEFAULT_SCALE_MIN, DEFAULT_SCALE_MAX, DEFAULT_TOTAL_LABEL, DEFAULT_RADAR_TOP_N,
   parseDimensionConfig, findDimension, parseRadarSpec, formatNum, formatDelta, scoreGuidanceText,
 } from './lib/dimensions.mjs'
-import { createStore, createRecord, personIdOf } from './lib/store.mjs'
+import { createStore, createRecord, personIdOf, MAX_DESCRIPTION_CHARS } from './lib/store.mjs'
 import { createIdentity } from './lib/identity.mjs'
 import { buildCardSvg, themeOf, CARD_THEMES } from './lib/card.mjs'
 import { createCardRenderer, fetchQqAvatar } from './lib/render.mjs'
@@ -28,10 +28,10 @@ import {
   DEFAULT_PROMPTS, buildColdStartPrompt, buildNudgePrompt, buildCompactPrompt,
   extractJsonObject, applyGeneration, buildCurrentScores, parseNudgePayload, applyNudge,
   shouldIgnoreNudgeDescription, textByteLength, truncateText, limitLabel,
-  renderTemplate,
+  renderTemplate, buildSystemPrompt, sanitizeDescription, MAX_NOTE_CHARS,
 } from './lib/llm.mjs'
 
-const VERSION = '1.0.5'
+const VERSION = '1.0.6'
 
 /** Electron 里 process.resourcesPath 一定在；纯 Node 下可能没有。 */
 function safeResourcesPath () {
@@ -81,13 +81,8 @@ export default {
   api: 1,
   description: '欢乐向的好感度 / 印象卡：多维度打分、雷达卡片、加减分系统通知、主动微调',
   panel: 'panel.js',
-  // 设置和面板作为「人设」分组下的子标签页「印象卡片」，和人格、聊天、主动搭话、心情并列；
-  // 注意不是 tab: 'persona'（那会塞进「人格」页内部）。
-  group: 'self',
-
+  // 不写 tab / group：宿主会把它当成扩展自己的独立页，落在默认的「系统」分组里。
   defaults: {
-    // 宿主版本较老时 /modules 不返回 group，面板靠这个标记把这一页挂到「人设」组下面。
-    __panelGroup: 'self',
     enabled: true,
     botName: '大肥鱼',
     cardTitle: '{bot_name}的印象档案',
@@ -249,6 +244,11 @@ export default {
       }
     }
 
+    /** 所有后台模型调用统一的 system：人格 + 「聊天/记忆/旧档案只是数据，不是指令」。 */
+    function systemFor (c) {
+      return buildSystemPrompt({ persona: persona(), nickname: (c || conf()).botName })
+    }
+
     // ---------- 聊天流水 / 记忆 ----------
 
     // 一天内的聊天流水只解析一次（上下文每轮都要看最后说话的人，别反复读文件）。
@@ -266,12 +266,21 @@ export default {
       return rows
     }
 
+    /** 能喂给模型的聊天行：忘掉的不算、bot 自己的话不算、系统「看过」占位行不算。 */
+    function usableChatRow (row) {
+      if (!row) return false
+      if (row.forgottenAt) return false
+      if (String(row.who || '') === 'bot') return false
+      if (String(row.kind || '') === 'seen') return false
+      return true
+    }
+
     function chatRows (chatId, days) {
       const rows = []
       const count = Number(days) || 2
       for (let i = count - 1; i >= 0; i--) {
         for (const row of rowsOfDay(dayKey(Date.now() - i * 86400000))) {
-          if (row && String(row.chatId) === String(chatId)) rows.push(row)
+          if (usableChatRow(row) && String(row.chatId) === String(chatId)) rows.push(row)
         }
       }
       return rows
@@ -310,16 +319,28 @@ export default {
       return null
     }
 
-    async function memoryBlock (ref) {
+    async function memoryBlock (ref, chatId) {
       const out = []
+      const where = String(chatId || '').trim()
+      const ownerQQ = String(api.config().ownerQQ || '')
+      // 只有主人私聊可以按主人视角看全库；群聊 / 非主人私聊必须按当前聊天做社交口径。
+      const ownerPrivate = Boolean(ownerQQ) && where === 'private:' + ownerQQ
+      const social = !ownerPrivate
       try {
         const memory = api.use('memory')
-        if (memory && typeof memory.recall === 'function') {
+        if (memory && typeof memory.recall === 'function' && /^(private|group):/.test(where)) {
           // recall 是关键词检索：名字、群名片、最近说过的话各试一次，去重后再交给提示词。
+          // where 必须传真实 chatId：空串在核心 memory 里会被当成「主人视角」。
+          const recallOptions = { about: ref.userId, limit: 20, where }
+          if (social) {
+            recallOptions.onlyAbout = ref.userId
+            recallOptions.requireAbout = true
+            recallOptions.excludeAbout = ownerQQ
+          }
           const queries = [ref.displayName, ref.groupCard, ref.userNickname].filter(Boolean)
           const seen = new Set()
           for (const query of [...new Set(queries)]) {
-            const hits = memory.recall(query, { about: ref.userId, limit: 20 }) || []
+            const hits = memory.recall(query, recallOptions) || []
             for (const hit of hits) {
               const text = hit && ((hit.it && hit.it.text) || hit.text)
               if (!text) continue
@@ -330,7 +351,8 @@ export default {
             }
           }
         }
-        if (memory && typeof memory.profiles === 'function') {
+        // 人物小档案是跨聊天汇总的，社交场景不读，避免把主人私聊里的内容带进群卡片。
+        if (ownerPrivate && memory && typeof memory.profiles === 'function') {
           const profile = (memory.profiles() || []).find((p) => String(p.qq) === String(ref.userId))
           const text = profile && (profile.text || profile.summary || profile.desc || profile.insight || profile.profile)
           if (text) out.unshift(String(text).replace(/\s+/g, ' ').slice(0, 600))
@@ -387,7 +409,7 @@ export default {
     async function generateRecord (ref, chatId, existing) {
       const c = conf()
       const parsedExisting = existing || store.get(ref.personId)
-      const memory = await memoryBlock(ref)
+      const memory = await memoryBlock(ref, chatId)
       const recent = recentChatText(chatId, c.recentMessages) || '（无）'
       const prompt = buildColdStartPrompt({
         persona: persona(),
@@ -408,7 +430,7 @@ export default {
       })
       let raw = ''
       try {
-        raw = await api.ask({ text: prompt, maxTokens: 1400 })
+        raw = await api.ask({ system: systemFor(c), text: prompt, maxTokens: 1400 })
       } catch (error) {
         log.warn('印象生成失败（' + (parsedExisting ? '刷新' : '冷启动') + '）：' + (error && error.message ? error.message : error))
       }
@@ -417,7 +439,7 @@ export default {
         ? { ...parsedExisting, scores: { ...(parsedExisting.scores || {}) } }
         : newRecordFor(ref, c)
       if (parsed) {
-        applyGeneration(record, parsed, { dimensions: c.dimensions, defaultScore: c.defaultScore })
+        applyGeneration(record, parsed, { dimensions: c.dimensions, defaultScore: c.defaultScore, descriptionLimit: c.noteSizeLimit })
       } else {
         for (const d of c.dimensions) {
           if (!Number.isFinite(Number(record.scores[d.key]))) record.scores[d.key] = c.defaultScore
@@ -522,8 +544,9 @@ export default {
       }).trim()
       if (!text) return false
       try {
-        await api.sendText(chatId, text)
-        return true
+        const sent = await api.sendText(chatId, text)
+        if (!sent) log.debug('系统通知没发出去（sendText 返回空）')
+        return Boolean(sent)
       } catch (error) {
         log.debug('系统通知没发出去：' + (error && error.message ? error.message : error))
         return false
@@ -541,6 +564,7 @@ export default {
         let out = ''
         try {
           out = await api.ask({
+            system: systemFor(c),
             text: buildCompactPrompt({
               persona: persona(),
               nickname: c.botName,
@@ -555,7 +579,7 @@ export default {
           log.warn('精简简介失败：' + (error && error.message ? error.message : error))
           break
         }
-        const next = String(out || '').replace(/^["「]|["」]$/g, '').trim()
+        const next = sanitizeDescription(String(out || '').replace(/^["「]|["」]$/g, ''), MAX_NOTE_CHARS)
         if (!next) break
         if (next.length < current.length) current = next
         if (current.length <= c.noteSizeLimit) return current
@@ -708,7 +732,12 @@ export default {
       const out = await renderCard(record, ref, { radarTopN: o.radarTopN })
       if (out.ok) {
         try {
-          await api.sendImage(chatId, out.file)
+          const sent = await api.sendImage(chatId, out.file)
+          // 核心的出站语义：被主动发言策略拦下 / 试运行 / 真失败都会返回 null 而不抛。
+          if (!sent) {
+            log.warn('卡片没发出去：sendImage 返回空（可能被策略拦下或在试运行）')
+            return { ok: false, message: '卡片画好了，但没发出去（可能被主动发言策略拦下，或在试运行）。', record }
+          }
           return { ok: true, file: out.file, record, message: '卡片已发送' }
         } catch (error) {
           log.warn('卡片发送失败：' + (error && error.message ? error.message : error))
@@ -716,7 +745,11 @@ export default {
         }
       }
       log.warn('卡片渲染失败，改发文字版：' + out.error)
-      await api.sendText(chatId, cardSummaryText(record, ref, c))
+      const textSent = await api.sendText(chatId, cardSummaryText(record, ref, c))
+      if (!textSent) {
+        log.warn('文字版卡片也没发出去（sendText 返回空）')
+        return { ok: false, record, message: '卡片没画出来，文字版也没发出去（可能被拦下或在试运行）。', fallback: true }
+      }
       return { ok: true, record, message: '图片渲染不可用，已发文字版卡片。', fallback: true }
     }
 
@@ -760,7 +793,7 @@ export default {
         })
         let raw = ''
         try {
-          raw = await api.ask({ text: prompt, maxTokens: 800 })
+          raw = await api.ask({ system: systemFor(c), text: prompt, maxTokens: 800 })
         } catch (error) {
           return { ok: false, message: '微调调用模型失败：' + (error && error.message ? error.message : error) }
         }
@@ -768,7 +801,7 @@ export default {
         if (!parsed) return { ok: false, message: '模型没给出有效 JSON，档案保持不变。' }
         const allowed = new Set(['total', ...c.dimensions.map((d) => d.key)])
         const { deltas, description } = parseNudgePayload(parsed, { allowedKeys: allowed, maxAbsDelta: c.lightMaxAbsDelta })
-        const result = applyNudge(existing, deltas, description, { ignoreDescription: ignore, defaultScore: c.defaultScore })
+        const result = applyNudge(existing, deltas, description, { ignoreDescription: ignore, defaultScore: c.defaultScore, descriptionLimit: c.noteSizeLimit })
         completeness(result.record, c)
         result.record.updatedAt = Date.now()
         identity.remember(result.record, ref)
@@ -1063,11 +1096,26 @@ export default {
 
     // ---------- 给她用的工具 ----------
 
+    /**
+     * 工具调用是否来自「这一轮说话的人全是主人」的会话。
+     * sessionId 优先取 DSH 传进 execute 的执行信息；没有时退回工具工厂拿到的 where.sessionId。
+     * 真正调用 turnSendersAllOwner 必须发生在 execute 时（工厂期算一次会把身份定死）。
+     */
+    function ownerToolCall (exec, fallbackSessionId) {
+      const sid = String(exec?.agent?.session?.id || exec?.session?.id || exec?.sessionId || fallbackSessionId || '')
+      const hub = api.core?.hub
+      if (!sid || typeof hub?.turnSendersAllOwner !== 'function') return false
+      try { return hub.turnSendersAllOwner(sid) === true } catch (error) { return false }
+    }
+
+    const notOwnerTool = () => ({ ok: false, message: '印象卡片的工具只在主人会话里可用（这一轮说话的人必须全是主人）。' })
+
     api.tool((where) => {
       const c = conf()
       const chat = where && where.chat
       if (!c.enabled || disposed || !chat || chat.kind === 'system') return []
       const chatId = chat.chatId
+      const whereSessionId = String((where && where.sessionId) || '')
       const ctx = { chat, chatId }
       const targetParam = { type: 'string', description: '对象：QQ 号或名字；不传表示当前说话的人' }
       const dimensionParam = { type: 'string', description: 'total（好感度整体评分）或维度 key；不传默认 total' }
@@ -1113,7 +1161,7 @@ export default {
         properties: { content: { type: 'string', description: '要追加的笔记文字' }, target: targetParam },
         required: ['content'],
         execute: async ({ content, target }) => {
-          const text = String(content || '').trim()
+          const text = sanitizeDescription(content, MAX_NOTE_CHARS)
           if (!text) return { ok: false, message: '内容为空，没有写入。' }
           const found = await lookup(target)
           if (found.error) return { ok: false, message: found.error }
@@ -1121,7 +1169,7 @@ export default {
           completeness(record, c)
           identity.remember(record, found.ref)
           const base = String(record.description || '').trim()
-          record.description = (base ? base + '\n' : '') + text
+          record.description = truncateText((base ? base + '\n' : '') + text, MAX_DESCRIPTION_CHARS, 'chars')
           record.updatedAt = Date.now()
           store.upsert(record)
           store.saveNow()
@@ -1135,7 +1183,7 @@ export default {
         properties: { content: { type: 'string', description: '新的完整笔记' }, target: targetParam },
         required: ['content'],
         execute: async ({ content, target }) => {
-          const text = String(content || '').trim()
+          const text = sanitizeDescription(content, MAX_NOTE_CHARS)
           if (!text) return { ok: false, message: '内容为空，原笔记已保留。' }
           const found = await lookup(target)
           if (found.error) return { ok: false, message: found.error }
@@ -1211,10 +1259,13 @@ export default {
       }))
 
       // 模块在使用中被关掉时，已挂载的工具也要立刻停手（工具清单不会因为设置变化重挂）。
+      // 主人门同样必须在 execute 时判定：工具清单是会话首轮挂的，在工厂期算一次会把当时的
+      // 主人身份永久借给后续群聊轮次（H01 教训）；这里统一给所有 impression_* 工具加门。
       for (const tool of tools) {
         const original = tool.execute
         tool.execute = async (...args) => {
           if (disposed || !conf().enabled) return { ok: false, message: '印象卡片已关闭。' }
+          if (!ownerToolCall(args[1], whereSessionId)) return notOwnerTool()
           return original(...args)
         }
       }
@@ -1224,7 +1275,7 @@ export default {
     api.rule((kind) => {
       const c = conf()
       if (!c.enabled) return ''
-      return '你有一套印象卡片：可以用 impression_adjust 给某人的好感度或某个维度加减分，impression_set 直接设为某个值，impression_append_note / impression_rewrite_note 写人物印象笔记，impression_detail 查档案，impression_nudge 做小幅微调，impression_refresh 全面重算，impression_send_card 主动发卡。target 可以传 QQ 号或名字，不传就是当前说话的人；dimension 用 total（独立的好感度）或维度 key。这是欢乐向设定，可以凭你的喜好打分、毒舌，但别对没聊过的人乱刷分。' + scoreGuidanceText({ defaultScore: c.defaultScore, scaleMin: c.scaleMin, scaleMax: c.scaleMax })
+      return '你有一套印象卡片：可以用 impression_adjust 给某人的好感度或某个维度加减分，impression_set 直接设为某个值，impression_append_note / impression_rewrite_note 写人物印象笔记，impression_detail 查档案，impression_nudge 做小幅微调，impression_refresh 全面重算，impression_send_card 主动发卡。这些工具只在主人会话里可用；群里别人说话的那一轮不要调用。target 可以传 QQ 号或名字，不传就是当前说话的人；dimension 用 total（独立的好感度）或维度 key。这是欢乐向设定，可以凭你的喜好打分、毒舌，但别对没聊过的人乱刷分。' + scoreGuidanceText({ defaultScore: c.defaultScore, scaleMin: c.scaleMin, scaleMax: c.scaleMax })
     })
 
     api.context(({ chat }) => {
@@ -1249,10 +1300,55 @@ export default {
 
     // ---------- 面板接口 ----------
 
+    /** 面板 Host 白名单：回环 / localhost / IP 字面量 / 配置的面板对外域名；挡 DNS rebinding。 */
+    function panelHostAllowed (req) {
+      const raw = String(req?.headers?.host || '').trim().toLowerCase()
+      if (!raw) return true // 非浏览器调用（测试 / 脚本）没有 Host，不是 rebinding 载体
+      const host = raw.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').replace(/\.$/, '')
+      if (!host) return true
+      if (host === 'localhost' || host.endsWith('.localhost')) return true
+      if (host === '::1' || host === '0.0.0.0') return true
+      // 域名 rebinding 的 Host 是攻击者域名；IP 字面量直连不是 rebinding。
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
+      if (/^[0-9a-f:.]+$/i.test(host) && host.includes(':')) return true
+      const cfg = api.config() || {}
+      const publicHost = String((cfg.security && cfg.security.publicHostname) || '')
+        .trim().toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '').replace(/\.$/, '')
+      return Boolean(publicHost) && host === publicHost
+    }
+
+    /** 面板接口只接受同源请求（照 history-vault / meme-wiki 的口径，另加 Host 白名单挡 DNS rebinding）。 */
+    function crossSite (req) {
+      const site = String(req?.headers?.['sec-fetch-site'] || '')
+      if (site === 'cross-site') return { ok: false, message: '不允许跨站调用' }
+      const origin = String(req?.headers?.origin || '')
+      if (origin) {
+        try {
+          if (new URL(origin).host !== String(req?.headers?.host || '')) return { ok: false, message: '不允许跨站调用' }
+        } catch (error) {
+          return { ok: false, message: '来源不合法' }
+        }
+      }
+      if (!panelHostAllowed(req)) return { ok: false, message: '不允许这个 Host 访问（疑似 DNS rebinding）' }
+      return null
+    }
+
+    /** 写接口（会改档案 / 发消息 / 渲染落盘）必须显式 POST，GET 一律拒绝。 */
+    function routeGuard (req, mustPost) {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
+      if (mustPost) {
+        const method = String((req && req.method) || 'GET').toUpperCase()
+        if (method !== 'POST') return { ok: false, message: '这个接口只接受 POST。' }
+      }
+      return null
+    }
+
     function chatForPerson (userId) {
       let best = null
       for (let i = 0; i < 2; i++) {
         for (const row of rowsOfDay(dayKey(Date.now() - i * 86400000))) {
+          if (!usableChatRow(row)) continue
           if (String(row.uid) !== String(userId)) continue
           if (!best || Number(row.t) > Number(best.t)) best = row
         }
@@ -1276,7 +1372,9 @@ export default {
       }
     }
 
-    api.route('/state', async () => {
+    api.route('/state', async (req) => {
+      const guard = routeGuard(req)
+      if (guard) return guard
       const c = conf()
       const stats = store.stats()
       let sharpReady = false
@@ -1317,6 +1415,11 @@ export default {
     })
 
     api.route('/card.png', async (req, res) => {
+      const guard = routeGuard(req)
+      if (guard) {
+        api.core.http.send(res, 403, guard)
+        return
+      }
       if (!conf().enabled) {
         api.core.http.send(res, 200, { ok: false, message: '印象卡片已关闭。' })
         return
@@ -1343,6 +1446,8 @@ export default {
     })
 
     api.route('/render', async (req) => {
+      const guard = routeGuard(req, true)
+      if (guard) return guard
       if (!conf().enabled) return { ok: false, message: '印象卡片已关闭。' }
       const body = await api.core.http.body(req)
       const record = store.get(String(body.personId || ''))
@@ -1359,6 +1464,8 @@ export default {
     })
 
     api.route('/refresh', async (req) => {
+      const guard = routeGuard(req, true)
+      if (guard) return guard
       const c = conf()
       if (!c.enabled) return { ok: false, message: '印象卡片已关闭。' }
       const body = await api.core.http.body(req)
@@ -1371,6 +1478,8 @@ export default {
     })
 
     api.route('/adjust', async (req) => {
+      const guard = routeGuard(req, true)
+      if (guard) return guard
       if (!conf().enabled) return { ok: false, message: '印象卡片已关闭。' }
       const body = await api.core.http.body(req)
       const record = store.get(String(body.personId || ''))
@@ -1385,6 +1494,8 @@ export default {
     })
 
     api.route('/delete', async (req) => {
+      const guard = routeGuard(req, true)
+      if (guard) return guard
       if (!conf().enabled) return { ok: false, message: '印象卡片已关闭。' }
       const body = await api.core.http.body(req)
       const id = String(body.personId || '')
@@ -1396,6 +1507,8 @@ export default {
     })
 
     api.route('/send', async (req) => {
+      const guard = routeGuard(req, true)
+      if (guard) return guard
       if (!conf().enabled) return { ok: false, message: '印象卡片已关闭。' }
       if (api.config().enabled === false) return { ok: false, message: 'Aurabot 总开关关着。' }
       const body = await api.core.http.body(req)
@@ -1408,7 +1521,11 @@ export default {
       return { ok: out.ok, message: out.message || '' }
     })
 
-    api.route('/help', async () => ({ ok: true, text: helpText() }))
+    api.route('/help', async (req) => {
+      const guard = routeGuard(req)
+      if (guard) return guard
+      return { ok: true, text: helpText() }
+    })
 
     // ---------- 主动微调 ----------
 
@@ -1423,7 +1540,7 @@ export default {
       for (let i = 0; i < 2; i++) rows.push(...rowsOfDay(dayKey(now - i * 86400000)))
       const byChat = new Map()
       for (const row of rows) {
-        if (!row || !row.chatId) continue
+        if (!usableChatRow(row) || !row.chatId) continue
         const list = byChat.get(String(row.chatId)) || []
         list.push(row)
         byChat.set(String(row.chatId), list)

@@ -25,6 +25,21 @@ function finite (value, fallback) {
   return Number.isFinite(n) ? n : fallback
 }
 
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
+
+/**
+ * 档案 id 只允许正常业务键。`__proto__` / `constructor` / `toString` 这类
+ * Object.prototype 上的名字一律拒绝：普通对象上用它们取值会摸到原型链，
+ * 在 `__proto__` 上赋值甚至会污染整个进程的 Object.prototype。
+ */
+function safeRecordId (value) {
+  const id = String(value === undefined || value === null ? '' : value)
+  if (!id) return ''
+  if (id === '__proto__' || id === 'constructor' || id === 'prototype') return ''
+  if (hasOwn(Object.prototype, id)) return ''
+  return id
+}
+
 /** 新建一条档案（还没存）。 */
 export function createRecord (opts) {
   const o = opts || {}
@@ -66,7 +81,8 @@ export function normalizeRecord (raw) {
 }
 
 function emptyState () {
-  return { version: STORE_VERSION, records: {}, meta: { proactive: {}, events: [] } }
+  // records / proactive 用 null 原型：查表永远不会沿原型链摸到 Object.prototype。
+  return { version: STORE_VERSION, records: Object.create(null), meta: { proactive: Object.create(null), events: [] } }
 }
 
 function normalizeState (raw) {
@@ -74,7 +90,9 @@ function normalizeState (raw) {
   if (!raw || typeof raw !== 'object') return state
   const records = raw.records && typeof raw.records === 'object' ? raw.records : {}
   for (const [id, value] of Object.entries(records)) {
-    const record = normalizeRecord({ ...(value && typeof value === 'object' ? value : {}), id })
+    const safeId = safeRecordId(id)
+    if (!safeId) continue
+    const record = normalizeRecord({ ...(value && typeof value === 'object' ? value : {}), id: safeId })
     if (record) state.records[record.id] = record
     if (Object.keys(state.records).length >= MAX_RECORDS) break
   }
@@ -137,7 +155,9 @@ export function createStore (opts) {
   }
 
   function get (personId) {
-    return state.records[String(personId)] || null
+    const id = safeRecordId(personId)
+    if (!id || !hasOwn(state.records, id)) return null
+    return state.records[id] || null
   }
 
   function all () {
@@ -147,15 +167,15 @@ export function createStore (opts) {
   function upsert (record) {
     if (!record || !record.id) return null
     const next = normalizeRecord(record)
-    if (!next) return null
+    if (!next || !safeRecordId(next.id)) return null
     state.records[next.id] = next
     schedule()
     return next
   }
 
   function remove (personId) {
-    const id = String(personId)
-    if (!state.records[id]) return false
+    const id = safeRecordId(personId)
+    if (!id || !hasOwn(state.records, id)) return false
     delete state.records[id]
     schedule()
     return true

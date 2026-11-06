@@ -361,7 +361,7 @@ return function Panel (props) {
       h('div', { style: { fontSize: 22, fontWeight: 650, lineHeight: 1.35, fontVariantNumeric: 'tabular-nums' } }, value))
   }
 
-  const settingsLine = '设置项在这个页面下方（「人设」页里的自动表单）。这里是只读预览：主题「' + (cfg.themeLabel || cfg.theme || '默认') +
+  const settingsLine = '设置项在这个页面下方（模块自动表单）。这里是只读预览：主题「' + (cfg.themeLabel || cfg.theme || '默认') +
     '」· 雷达 ' + radarTop + ' 项 · 量程 ' + fmt1(cfg.scaleMin) + ' ～ ' + fmt1(cfg.scaleMax)
 
   const topCard = h(ui.Card, {

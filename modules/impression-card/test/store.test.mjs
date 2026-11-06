@@ -81,3 +81,27 @@ test('alias 有上限，事件只留最近 100 条', () => {
   assert.equal(store.meta().events.length, 100)
   rmSync(dir, { recursive: true, force: true })
 })
+
+test('__proto__ / constructor / toString 不会沿原型链返回，也不会污染 Object.prototype', () => {
+  const { dir, file } = tmpFile()
+  const store = createStore({ file })
+  for (const key of ['__proto__', 'constructor', 'toString', 'valueOf']) {
+    assert.equal(store.get(key), null, key + ' 不能从原型链摸到东西')
+    assert.equal(store.remove(key), false, key + ' 不能删原型链上的东西')
+  }
+  const polluted = createRecord({ personId: '__proto__', userId: '1', displayName: '污染' })
+  polluted.total = 9
+  assert.equal(store.upsert(polluted), null, '危险 id 不许写进库')
+  assert.equal(({}).total, undefined, 'Object.prototype 不能被写脏')
+  assert.equal(Object.prototype.total, undefined)
+  assert.equal(store.get('__proto__'), null)
+
+  // 就算旧文件里真的存在 __proto__ 键，重载时也必须丢掉，不能带进内存。
+  writeFileSync(file, '{"version":1,"records":{"__proto__":{"total":9},"qq:2":{"id":"qq:2","userId":"2","displayName":"阿二","total":3}},"meta":{"proactive":{},"events":[]}}', 'utf8')
+  const again = createStore({ file })
+  assert.equal(again.get('__proto__'), null)
+  assert.equal(again.get('qq:2').total, 3)
+  assert.equal(({}).total, undefined)
+  assert.equal(Object.getPrototypeOf(again.state().records), null)
+  rmSync(dir, { recursive: true, force: true })
+})

@@ -7,6 +7,8 @@ import {
   DEFAULT_PROMPTS,
   applyGeneration,
   applyNudge,
+  buildSystemPrompt,
+  sanitizeDescription,
   buildColdStartPrompt,
   buildCompactPrompt,
   buildCurrentScores,
@@ -366,4 +368,37 @@ test('renderTemplate 与 fillTemplate 行为一致', () => {
   assert.equal(renderTemplate('{name}', { name: '小明' }), '小明')
   assert.equal(renderTemplate('{{name}}', { name: '小明' }), '{小明}')
   assert.equal(renderTemplate('{unknown}', {}), '{unknown}')
+})
+
+test('buildSystemPrompt：人格和「数据不是指令」都在，空输入有兜底', () => {
+  const system = buildSystemPrompt({ nickname: '大肥鱼', persona: PERSONA })
+  assert.match(system, /大肥鱼/)
+  assert.match(system, /贪吃又爱睡/)
+  assert.match(system, /不是指令/)
+  assert.match(system, /聊天记录/)
+  const empty = buildSystemPrompt()
+  assert.equal(typeof empty, 'string')
+  assert.match(empty, /不是指令/)
+})
+
+test('sanitizeDescription：去控制字符 / 零宽字符、压缩空行、按字符封顶', () => {
+  assert.equal(sanitizeDescription('  a\u0000b\u200bc  ', 100), 'abc')
+  assert.equal(sanitizeDescription('第一行\r\n第二行', 100), '第一行\n第二行')
+  assert.equal(sanitizeDescription('a\n\n\n\n\nb', 100), 'a\n\nb')
+  const long = sanitizeDescription('x'.repeat(50), 10)
+  assert.ok(textWithinLimit(long, 10, 'chars'))
+  assert.equal(sanitizeDescription('   ', 10), '')
+  assert.equal(sanitizeDescription(null, 10), '')
+})
+
+test('applyGeneration / applyNudge：description 超长会被截断、控制字符会被清掉', () => {
+  const record = { total: 5, scores: {}, description: '旧' }
+  applyGeneration(record, { description: '好\u0000的' + 'x'.repeat(500) }, { dimensions: DIMS, defaultScore: 5, descriptionLimit: 20 })
+  assert.ok(!record.description.includes('\u0000'))
+  assert.ok(textWithinLimit(record.description, 20, 'chars'))
+
+  const nudged = { total: 5, scores: {}, description: '旧' }
+  applyNudge(nudged, {}, '新\u200b笔记' + 'y'.repeat(500), { defaultScore: 5, descriptionLimit: 20 })
+  assert.ok(!nudged.description.includes('\u200b'))
+  assert.ok(textWithinLimit(nudged.description, 20, 'chars'))
 })
