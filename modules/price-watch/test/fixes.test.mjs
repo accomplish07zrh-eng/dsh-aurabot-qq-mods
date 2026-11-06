@@ -346,6 +346,23 @@ test('价格记录：有上限 / LRU，/state 只下发当前监控用到的 key
   cleanup(h)
 })
 
+test('价格记录防原型链：__proto__ 商品不会污染 Object.prototype', async () => {
+  const h = makeHarness({ rows: [row('__proto__', 199)] })
+  try {
+    priceWatch.setup(h.api, { fetch: h.fetch })
+    const beforeObservations = Object.prototype.observations
+    const beforeLastSeen = Object.prototype.lastSeen
+    const out = await h.rec.routes.get('/search')({ method: 'POST', headers: {}, __body: { query: '__proto__' } })
+    assert.equal(out.ok, true, out.message)
+    assert.equal(Object.prototype.observations, beforeObservations, 'Object.prototype.observations 不能被写')
+    assert.equal(Object.prototype.lastSeen, beforeLastSeen, 'Object.prototype.lastSeen 不能被写')
+    const saved = readState(h)
+    assert.ok(Object.prototype.hasOwnProperty.call(saved.records, '__proto__'), '__proto__ 只作为普通自有键保存')
+  } finally {
+    cleanup(h)
+  }
+})
+
 test('定时检查走 api.every(60s) 并在停用时清理，不用裸 setInterval', async () => {
   const h = makeHarness()
   priceWatch.setup(h.api, { fetch: h.fetch })

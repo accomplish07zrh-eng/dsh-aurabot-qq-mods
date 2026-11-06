@@ -229,13 +229,16 @@ export default {
     const fetchImpl = dependencies.fetch || ((url, init) => fetch(url, init))
 
     // ---------- 状态 ----------
-    let state = { watches: [], records: {}, lastCheck: 0, lastResult: '还没检查过', checks: 0, alerts: 0, day: '', dayChecks: 0, pending: [] }
+    // records 用 null 原型：商品指纹可能等于 __proto__ / constructor，普通字面量会把查表带到原型链上。
+    let state = { watches: [], records: Object.create(null), lastCheck: 0, lastResult: '还没检查过', checks: 0, alerts: 0, day: '', dayChecks: 0, pending: [] }
     try {
       const loaded = JSON.parse(readFileSync(file(), 'utf8'))
       if (loaded && typeof loaded === 'object') state = { ...state, ...loaded }
     } catch (error) {}
     state.watches = Array.isArray(state.watches) ? state.watches.filter((w) => w && typeof w === 'object' && w.id && w.query) : []
-    state.records = state.records && typeof state.records === 'object' ? pruneRecords(state.records, MAX_RECORDS) : {}
+    state.records = state.records && typeof state.records === 'object'
+      ? Object.assign(Object.create(null), pruneRecords(state.records, MAX_RECORDS))
+      : Object.create(null)
     state.pending = Array.isArray(state.pending) ? state.pending.filter((p) => p && typeof p === 'object' && p.chatId).slice(-20) : []
     for (const key of ['lastCheck', 'checks', 'alerts', 'dayChecks']) if (!Number.isFinite(Number(state[key])) || Number(state[key]) < 0) state[key] = 0
     for (const watch of state.watches) {
@@ -401,7 +404,8 @@ export default {
     }
 
     function recordOf (key) {
-      return key ? state.records[key] || null : null
+      if (!key || !Object.prototype.hasOwnProperty.call(state.records, key)) return null
+      return state.records[key] || null
     }
 
     /**
@@ -1076,7 +1080,7 @@ export default {
       const out = {}
       for (const watch of state.watches) {
         const key = watch && watch.key
-        if (key && state.records[key]) out[key] = state.records[key]
+        if (key && Object.prototype.hasOwnProperty.call(state.records, key)) out[key] = state.records[key]
       }
       return out
     }
