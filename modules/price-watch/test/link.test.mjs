@@ -35,3 +35,19 @@ test('链接识别：不是网址格式但带 http 的，当成 unknown 不崩',
   assert.equal(r.isLink, true)
   assert.equal(r.kind, 'unknown')
 })
+
+test('链接识别：域名必须精确匹配，同形域名不能误判', () => {
+  // 这些在未锚定时会被 /jd\.com$/ 当成京东
+  assert.equal(linkKind('https://evil-jd.com/x').kind, 'unknown')
+  assert.equal(linkKind('https://notjd.com/x').kind, 'unknown')
+  assert.equal(linkKind('https://13.cn/x').kind, 'unknown')
+  assert.equal(linkKind('https://jd.com.evil.net/x').kind, 'unknown')
+  assert.equal(linkKind('https://www.smzdm.com@evil.com/p/1').kind, 'unknown')
+  // 真正的子域仍然认
+  assert.equal(linkKind('https://item.jd.com/1.html').kind, 'jd')
+  assert.equal(linkKind('https://item.jd.hk/1.html').kind, 'jd')
+  assert.equal(linkKind('https://item.3.cn/1.html').kind, 'jd')
+  assert.equal(linkKind('https://detail.tmall.hk/item.htm?id=1').kind, 'taobao')
+  assert.equal(linkKind('https://mobile.yangkeduo.com/goods.html?goods_id=1').kind, 'pdd')
+  assert.equal(linkKind('https://www.douyin.com/video/1').kind, 'douyin')
+})

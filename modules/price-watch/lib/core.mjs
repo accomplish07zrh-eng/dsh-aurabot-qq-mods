@@ -236,4 +236,56 @@ export function shanghaiDay (ts) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date(n))
 }
 
-export default { parsePrice, formatPrice, productKey, scoreRate, heatScore, qualityOf, matchScore, pickCandidates, evaluateAlert, shanghaiDay }
+/**
+ * 本机价格记录按最近使用裁到上限（LRU）：超出时删掉最久没被 observe() 碰过的商品指纹。
+ * 就地修改 records 并返回它，方便测试和 index.mjs 的加载/观测路径复用。
+ */
+export function pruneRecords (records, limit = 800) {
+  if (!records || typeof records !== 'object') return {}
+  const max = Math.max(1, Math.floor(Number(limit) || 800))
+  const keys = Object.keys(records)
+  if (keys.length <= max) return records
+  const seenAt = (key) => {
+    const row = records[key] || {}
+    const stamp = Number(row.lastSeen)
+    if (Number.isFinite(stamp) && stamp > 0) return stamp
+    const low = Number(row.lowestAt)
+    return Number.isFinite(low) && low > 0 ? low : 0
+  }
+  keys.sort((a, b) => seenAt(a) - seenAt(b))
+  for (const key of keys.slice(0, keys.length - max)) delete records[key]
+  return records
+}
+
+/** 失败退避的上限：6 小时。正常间隔本身比它长时保持正常间隔，不反向缩短。 */
+export const FAIL_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000
+
+/**
+ * 一条监控失败后的下次检查间隔：每次失败翻倍（interval × 2^k），最长 6 小时。
+ * 失败次数由调用方落盘，这里只做纯计算。
+ */
+export function retryIntervalMs (intervalMinutes, failCount) {
+  const base = Math.max(1, Number(intervalMinutes) || 60) * 60000
+  const fails = Math.max(0, Math.min(20, Math.floor(Number(failCount) || 0)))
+  return Math.min(base * Math.pow(2, fails), Math.max(base, FAIL_BACKOFF_MAX_MS))
+}
+
+/**
+ * 这一轮该检查哪些监控：手动强制全部，定时只挑到期的；按 lastCheck 最旧的先来，
+ * 失败过的按 retryIntervalMs 退避。only 精确取一条（手动按 id 检查）。
+ */
+export function dueWatches (watches, { now = Date.now(), intervalMinutes = 60, max = Infinity, only = null, force = false } = {}) {
+  const list = (Array.isArray(watches) ? watches : []).filter((watch) => watch && watch.id)
+  if (only) return list.filter((watch) => watch.id === only).slice(0, 1)
+  const stamp = Number(now)
+  const due = force ? list.slice() : list.filter((watch) => {
+    const last = Number(watch.lastCheck) || 0
+    if (!last) return true
+    return stamp - last >= retryIntervalMs(intervalMinutes, watch.failCount) - 5000
+  })
+  due.sort((a, b) => (Number(a.lastCheck) || 0) - (Number(b.lastCheck) || 0))
+  const cap = Number.isFinite(Number(max)) ? Math.max(1, Math.floor(Number(max))) : due.length
+  return due.slice(0, cap)
+}
+
+export default { parsePrice, formatPrice, productKey, scoreRate, heatScore, qualityOf, matchScore, pickCandidates, evaluateAlert, shanghaiDay, pruneRecords, retryIntervalMs, dueWatches, FAIL_BACKOFF_MAX_MS }

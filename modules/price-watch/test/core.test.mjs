@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import {
   parsePrice, formatPrice, productKey, scoreRate, heatScore,
   qualityOf, matchScore, pickCandidates, evaluateAlert,
+  pruneRecords, retryIntervalMs, dueWatches, FAIL_BACKOFF_MAX_MS,
 } from '../lib/core.mjs'
 
 test('价格解析：只取售价，跳过返还额、满减门槛、原价', () => {
@@ -140,4 +141,49 @@ test('降价提醒：价格无效时不报成功', () => {
   assert.equal(evaluateAlert({ price: 100, lowest: 90 }, null).alert, false)
   assert.equal(evaluateAlert({ price: 100, lowest: 90 }, 0).alert, false)
   assert.equal(evaluateAlert({ price: 100, lowest: 90 }, NaN).alert, false)
+})
+
+test('记录表 LRU：超出上限时先淘汰最久没碰过的商品指纹', () => {
+  const records = {
+    a: { lowest: 100, lowestAt: 1000, lastSeen: 3000 },
+    b: { lowest: 200, lowestAt: 2000, lastSeen: 1000 },
+    c: { lowest: 300, lowestAt: 3000, lastSeen: 2000 },
+  }
+  pruneRecords(records, 2)
+  assert.deepEqual(Object.keys(records).sort(), ['a', 'c'])
+  assert.equal(records.b, undefined, 'lastSeen 最旧的那条被淘汰')
+  const small = { only: { lastSeen: 1 } }
+  assert.equal(pruneRecords(small, 5), small, '不到上限时原对象不动')
+  assert.deepEqual(pruneRecords(null, 3), {})
+  const noSeen = { x: { lowestAt: 10 }, y: { lowestAt: 20 } }
+  pruneRecords(noSeen, 1)
+  assert.deepEqual(Object.keys(noSeen), ['y'], '没有 lastSeen 时回落到 lowestAt')
+})
+
+test('失败退避：间隔翻倍，最长 6 小时；正常间隔本身更长时不缩短', () => {
+  assert.equal(retryIntervalMs(60, 0), 3600000)
+  assert.equal(retryIntervalMs(60, 1), 7200000)
+  assert.equal(retryIntervalMs(60, 2), 14400000)
+  assert.equal(retryIntervalMs(60, 3), FAIL_BACKOFF_MAX_MS, '8 小时被 6 小时封顶')
+  assert.equal(retryIntervalMs(10, 10), FAIL_BACKOFF_MAX_MS)
+  assert.equal(retryIntervalMs(1440, 3), 86400000, '24 小时正常间隔不该被 6 小时上限压短')
+  assert.equal(retryIntervalMs(60, -5), 3600000, '负失败次数按 0 处理')
+})
+
+test('到期挑选：按 lastCheck 最旧优先，失败过的按退避顺延，最多取 N 条', () => {
+  const now = 10_000_000_000
+  const watches = [
+    { id: 'new', lastCheck: now - 60_000 },
+    { id: 'old', lastCheck: now - 3 * 3600_000 },
+    { id: 'mid', lastCheck: now - 2 * 3600_000 },
+    { id: 'failed', lastCheck: now - 3 * 3600_000, failCount: 2 },
+    { id: 'never', lastCheck: 0 },
+  ]
+  const due = dueWatches(watches, { now, intervalMinutes: 60, max: 3 })
+  assert.deepEqual(due.map((w) => w.id), ['never', 'old', 'mid'], '失败退避中的 failed 不占名额')
+  assert.equal(due.length, 3, '每轮仍有上限')
+  const manual = dueWatches(watches, { now, intervalMinutes: 60, max: 2, force: true })
+  assert.deepEqual(manual.map((w) => w.id), ['never', 'old'], '手动强制不看间隔，但仍按最旧优先并截断')
+  assert.deepEqual(dueWatches(watches, { now, only: 'failed', intervalMinutes: 60, max: 5 }).map((w) => w.id), ['failed'], 'only 精确取一条，不受退避影响')
+  assert.deepEqual(dueWatches(watches, { now, only: 'nope' }), [])
 })

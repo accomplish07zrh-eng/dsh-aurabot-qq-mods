@@ -17,13 +17,15 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { parsePrice, formatPrice, productKey, qualityOf, pickCandidates, evaluateAlert } from './lib/core.mjs'
+import { parsePrice, formatPrice, productKey, qualityOf, pickCandidates, evaluateAlert, pruneRecords, dueWatches } from './lib/core.mjs'
 
-const VERSION = '1.0.0'
+const VERSION = '1.0.1'
 const LIST_API = 'https://api.smzdm.com/v1/list'
 const PAGE_SIZE = 50
 const MAX_PAGES = 5
 const FETCH_TIMEOUT = 12000
+/** 本机价格记录的上限：超出后按 LRU 淘汰最久没碰过的商品指纹，避免 state.json 无限膨胀。 */
+export const MAX_RECORDS = 800
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36'
 
 /** 一个监控最长保留多久（天）；0 表示不过期。避免「监控」列表无限攒灰。 */
@@ -42,6 +44,9 @@ function nowMs () {
   return Date.now()
 }
 
+/** host 是否等于域名本身或它的子域：evil-jd.com / notjd.com 这种同形域名不能算。 */
+const hostIs = (host, domain) => host === domain || host.endsWith('.' + domain)
+
 /**
  * 用户可能发来一整个链接。什么值得买的文章页能用 og:title 换回商品名，
  * 但这需要多请求一次文章页；京东 / 淘宝那些链接我们不去抓页面。
@@ -53,11 +58,11 @@ export function linkKind (raw) {
   const url = m[0]
   let host = ''
   try { host = new URL(url).hostname.toLowerCase() } catch (error) { return { isLink: true, url, kind: 'unknown' } }
-  if (/(^|\.)smzdm\.com$/.test(host)) return { isLink: true, url, kind: 'smzdm' }
-  if (/jd\.com$|jd\.hk$|3\.cn$/.test(host)) return { isLink: true, url, kind: 'jd' }
-  if (/taobao\.com$|tmall\.com$|tmall\.hk$/.test(host)) return { isLink: true, url, kind: 'taobao' }
-  if (/yangkeduo\.com$|pinduoduo\.com$/.test(host)) return { isLink: true, url, kind: 'pdd' }
-  if (/douyin\.com$|jinritemai\.com$/.test(host)) return { isLink: true, url, kind: 'douyin' }
+  if (hostIs(host, 'smzdm.com')) return { isLink: true, url, kind: 'smzdm' }
+  if (hostIs(host, 'jd.com') || hostIs(host, 'jd.hk') || hostIs(host, '3.cn')) return { isLink: true, url, kind: 'jd' }
+  if (hostIs(host, 'taobao.com') || hostIs(host, 'tmall.com') || hostIs(host, 'tmall.hk')) return { isLink: true, url, kind: 'taobao' }
+  if (hostIs(host, 'yangkeduo.com') || hostIs(host, 'pinduoduo.com')) return { isLink: true, url, kind: 'pdd' }
+  if (hostIs(host, 'douyin.com') || hostIs(host, 'jinritemai.com')) return { isLink: true, url, kind: 'douyin' }
   return { isLink: true, url, kind: 'unknown' }
 }
 
@@ -171,9 +176,8 @@ export default {
   api: 1,
   description: '盯住商品价格：超级好价、早期好价、降价提醒、本插件记录的历史最低价；/监控价格 与 /查询价格 支持多平台比价。',
   panel: 'panel.js',
-  // 入口挂在面板「平台」组下面（和空间、B站、抖音、小黑盒排在一起），自己占一页。
-  // 注意用 group 而不是 tab：tab 会塞进某个内置页内部。
-  group: 'platform',
+  // 自己占一页，但不写模块自定义分组：当前宿主各版本对扩展分组的识别不一致，
+  // 「价格监控」不命中「平台」类名字规则，实际落在「系统」组。
   // 子标签页上的「开/关」小圆点读的是 flag 指向的那个设置项。这里故意用 active 而不是 enabled：
   // 宿主对 flag === 'enabled'（或 settings 里有 enabled）的模块，会在页面标题栏再画一个总开关、
   // 还会把设置自动表单再列一遍。用 active 就只拿到圆点，不加那个开关。
@@ -205,9 +209,6 @@ export default {
     checkEndHour: 0,
     // 每轮最多检查几个，防止一次打出去一堆提醒
     maxChecksPerRun: 5,
-    // 老版本宿主不会把模块定义里的 group 传给面板，改用 defaults 里这个标记兜底
-    // （和印象卡片用的是同一个约定）。
-    __panelGroup: 'platform',
   },
   // 设置全部由 panel.js 自己渲染（它本来就是这一页的全部内容）。
   // 这里留空，宿主就不会再生成一份自动表单。
@@ -234,24 +235,25 @@ export default {
       if (loaded && typeof loaded === 'object') state = { ...state, ...loaded }
     } catch (error) {}
     state.watches = Array.isArray(state.watches) ? state.watches.filter((w) => w && typeof w === 'object' && w.id && w.query) : []
-    state.records = state.records && typeof state.records === 'object' ? state.records : {}
+    state.records = state.records && typeof state.records === 'object' ? pruneRecords(state.records, MAX_RECORDS) : {}
     state.pending = Array.isArray(state.pending) ? state.pending.filter((p) => p && typeof p === 'object' && p.chatId).slice(-20) : []
     for (const key of ['lastCheck', 'checks', 'alerts', 'dayChecks']) if (!Number.isFinite(Number(state[key])) || Number(state[key]) < 0) state[key] = 0
     for (const watch of state.watches) {
       watch.history = Array.isArray(watch.history) ? watch.history.filter((h) => h && Number.isFinite(Number(h.price))).slice(-60) : []
       if (!Number.isFinite(Number(watch.createdAt)) || !watch.createdAt) watch.createdAt = nowMs()
       if (!Number.isFinite(Number(watch.alerts)) || Number(watch.alerts) < 0) watch.alerts = 0
+      if (!Number.isFinite(Number(watch.failCount)) || Number(watch.failCount) < 0) watch.failCount = 0
       if (!Array.isArray(watch.seenQuality)) watch.seenQuality = []
     }
 
     let disposed = false
     let busy = false
-    let timer = null
+    let stopChecks = null
     const controller = new AbortController()
     api.onDispose(() => {
       disposed = true
       controller.abort()
-      if (timer) clearInterval(timer)
+      if (stopChecks) stopChecks()
     })
 
     const save = () => {
@@ -402,24 +404,38 @@ export default {
       return key ? state.records[key] || null : null
     }
 
-    /** 用一条观测更新「本插件记录的最低价」。返回是否创了新低。 */
+    /**
+     * 用一条观测更新「本插件记录的最低价」。返回是否创了新低。
+     * lastSeen 用来做记录表的 LRU；每次都裁到 MAX_RECORDS，state.json 不会无限长。
+     */
     function observe (key, price, url, title, stamp) {
       if (!key || !Number.isFinite(Number(price)) || Number(price) <= 0) return false
       const cur = recordOf(key)
-      const lowest = cur && Number.isFinite(Number(cur.lowest)) ? Number(cur.lowest) : Infinity
       if (!cur) {
-        state.records[key] = { lowest: Math.round(Number(price) * 100) / 100, lowestAt: stamp, title: String(title || '').slice(0, 120), url: String(url || ''), observations: 1 }
+        state.records[key] = {
+          lowest: Math.round(Number(price) * 100) / 100,
+          lowestAt: stamp,
+          lastSeen: stamp,
+          title: String(title || '').slice(0, 120),
+          url: String(url || ''),
+          observations: 1,
+        }
+        pruneRecords(state.records, MAX_RECORDS)
         return true
       }
       cur.observations = (Number(cur.observations) || 0) + 1
+      cur.lastSeen = stamp
       cur.title = String(title || cur.title || '').slice(0, 120)
       if (url) cur.url = String(url)
+      let isLow = false
+      const lowest = Number.isFinite(Number(cur.lowest)) ? Number(cur.lowest) : Infinity
       if (Number(price) < lowest) {
         cur.lowest = Math.round(Number(price) * 100) / 100
         cur.lowestAt = stamp
-        return true
+        isLow = true
       }
-      return false
+      pruneRecords(state.records, MAX_RECORDS)
+      return isLow
     }
 
     // ---------- 命令渲染 ----------
@@ -467,7 +483,7 @@ export default {
     async function addWatch (query, chatId, options = {}) {
       const c = conf()
       if (!c.enabled) return { ok: false, message: '价格监控关着，先在面板或 /价格监控帮助 里打开。' }
-      if (!chatAllowed(chatId, c)) return { ok: false, message: '这个群还没加进价格监控白名单，先让主人在面板「平台 → 价格监控」里把群号加上。' }
+      if (!chatAllowed(chatId, c)) return { ok: false, message: '这个群还没加进价格监控白名单，先让主人在面板「系统 → 价格监控」里把群号加上。' }
       let q = String(query || '').trim()
       if (!q) return { ok: false, message: '要监控什么？发 /监控价格 商品名或链接，比如 /监控价格 switch 2。' }
       // 允许直接发链接：什么值得买的链接能换回商品名，京东 / 淘宝的会给出提示
@@ -659,7 +675,11 @@ export default {
       return lines.join('\n')
     }
 
-    /** 检查一个监控：重新查这件商品，更新价格，判断要不要提醒。 */
+    /**
+     * 检查一个监控：重新查这件商品、更新观测数据，判断要不要提醒。
+     * 这里只算「该提醒什么」，不写 lastAlert / alerts / state.alerts ——
+     * 那些要等 runChecks 里 api.sendText 真的成功以后再落账；发失败不占冷却。
+     */
     async function checkOne (watch, c) {
       const items = await request(watch.title, 1)
       if (!items.length) return { ok: false, watch, message: '查不到这件商品了' }
@@ -694,21 +714,27 @@ export default {
       watch.lowestAt = record && record.lowestAt ? record.lowestAt : stamp
       watch.lastCheck = stamp
       watch.history = [...(watch.history || []), { at: stamp, price: item.price }].slice(-60)
-      if (item.quality && !(watch.seenQuality || []).includes(item.quality)) watch.seenQuality = [...(watch.seenQuality || []), item.quality].slice(-4)
       const alert = result.alert || qualityNew
       let message = ''
+      let cooled = false
       if (alert) {
-        const reasons = [...result.reasons]
-        if (qualityNew && !reasons.length) reasons.push(item.qualityLabel)
-        const cooled = watch.lastAlert && stamp - watch.lastAlert < c.cooldown
-        if (!cooled) {
-          watch.lastAlert = stamp
-          watch.alerts = (Number(watch.alerts) || 0) + 1
-          state.alerts = (Number(state.alerts) || 0) + 1
+        cooled = Boolean(watch.lastAlert && stamp - watch.lastAlert < c.cooldown)
+        if (cooled) {
+          // 冷却期内不播；记下这个等级，免得冷却结束后把同一条好价补发一遍。
+          if (qualityNew && item.quality) watch.seenQuality = [...(watch.seenQuality || []), item.quality].slice(-4)
+        } else {
+          const reasons = [...result.reasons]
+          if (qualityNew && !reasons.length) reasons.push(item.qualityLabel)
           message = alertLine(watch, { ...result, reasons }, item, before)
         }
       }
-      return { ok: true, watch, alerted: Boolean(message), message, before, isNewLow }
+      return { ok: true, watch, alerted: Boolean(message), message, before, isNewLow, quality: qualityNew ? item.quality : '', at: stamp }
+    }
+
+    /** 失败也记一次 lastCheck 并累加失败次数，下一轮按指数退避，不再每 60 秒重打同一条。 */
+    function markCheckFailed (watch, stamp) {
+      watch.lastCheck = stamp
+      watch.failCount = Math.min(20, (Number(watch.failCount) || 0) + 1)
     }
 
     /** 检查所有到期的监控，把提醒发到当初添加它的聊天。 */
@@ -724,15 +750,15 @@ export default {
         return { ok: true, checked: 0, alerts: 0, message: state.lastResult, skipped: 'window' }
       }
       expiring(c, stamp)
-      // 手动（面板「立即检查」/ 工具）不看间隔，定时任务才按间隔挑到期的
-      const due = state.watches
-        .filter((w) => {
-          if (only) return w.id === only
-          if (manual) return true
-          return !w.lastCheck || stamp - w.lastCheck >= c.intervalMinutes * 60000 - 5000
-        })
-        // 每轮最多查这么几个：一次打出去一堆提醒最容易刷屏
-        .slice(0, only ? 1 : c.maxChecks)
+      // 手动（面板「立即检查」/ 工具）强制检查全部；定时任务只挑到期的，失败过的按退避间隔顺延。
+      // 一律按 lastCheck 最旧的先查 —— 前几条长期失败不会把后面的监控永远挡住。
+      const due = dueWatches(state.watches, {
+        now: stamp,
+        intervalMinutes: c.intervalMinutes,
+        max: c.maxChecks,
+        only,
+        force: manual,
+      })
       if (!due.length) {
         state.lastResult = only ? '没有这个监控' : manual ? '还没有在监控的商品' : '还没到下次检查时间'
         return { ok: true, checked: 0, alerts: 0, message: state.lastResult }
@@ -748,8 +774,10 @@ export default {
             const out = await checkOne(watch, c)
             checked++
             if (out.ok) {
+              watch.failCount = 0
               state.lastResult = clock(stamp) + ' 查了 ' + watch.title.slice(0, 20) + '：' + priceText(watch.price)
             } else {
+              markCheckFailed(watch, stamp)
               state.lastResult = clock(stamp) + ' ' + out.message
             }
             if (out.alerted && out.message) {
@@ -759,18 +787,31 @@ export default {
                 // 群被移出白名单后不再往那儿发，也不占用「已提醒」计数
                 log.info('价格监控：' + watch.chatId + ' 已不在白名单，跳过提醒')
               } else {
-                const ok = await api.sendText(watch.chatId, withMention(watch.chatId, watch.creatorId, out.message, c))
-                if (ok !== null && ok !== undefined) {
+                let ok = null
+                try {
+                  ok = await api.sendText(watch.chatId, withMention(watch.chatId, watch.creatorId, out.message, c))
+                } catch (error) {
+                  log.warn('价格提醒发送出错：' + (error && error.message ? error.message : error))
+                }
+                if (ok) {
+                  // 只有真的发出去了才占冷却、计数、好价等级；失败 / 试运行 / 白名单外都不算
+                  watch.lastAlert = out.at
+                  watch.alerts = (Number(watch.alerts) || 0) + 1
+                  state.alerts = (Number(state.alerts) || 0) + 1
+                  if (out.quality && !(watch.seenQuality || []).includes(out.quality)) {
+                    watch.seenQuality = [...(watch.seenQuality || []), out.quality].slice(-4)
+                  }
                   alerts++
                   sent.push({ id: watch.id, title: watch.title, message: out.message })
                   log.info('价格提醒已发到 ' + watch.chatId + '：' + watch.title.slice(0, 30) + ' ' + priceText(watch.price))
                 } else {
-                  log.warn('价格提醒没发出去：' + watch.chatId)
+                  log.warn('价格提醒没发出去（不占冷却和计数）：' + watch.chatId)
                 }
               }
             }
           } catch (error) {
             if (disposed) break
+            markCheckFailed(watch, stamp)
             state.lastResult = clock(stamp) + ' 检查失败：' + (error && error.message ? error.message : error)
             log.warn('价格监控检查失败：' + (error && error.message ? error.message : error))
           }
@@ -804,7 +845,7 @@ export default {
       const text = String(arg || '').trim()
       if (!text) return '要监控什么？发 /监控价格 商品名，比如 /监控价格 switch 2。'
       if (!c.enabled) return '价格监控关着。先在面板里打开。'
-      if (!chatAllowed(msg.chatId, c)) return '这个群还没加进价格监控白名单，先让主人在面板「平台 → 价格监控」里把群号加上。'
+      if (!chatAllowed(msg.chatId, c)) return '这个群还没加进价格监控白名单，先让主人在面板「系统 → 价格监控」里把群号加上。'
       if (!isOwner(msg) && !c.guestWatch) return '这个只有主人能加。'
       try {
         // 先看看是不是在回答「选哪个」：「/监控价格 2」
@@ -899,7 +940,7 @@ export default {
       if (word === '价格监控帮助' || word === '价格帮助') { await reply(helpText()); return true }
       if (word === '价格列表' || word === '取消监控') { await reply('监控列表只有主人能看。'); return true }
       if (!c.enabled) { await reply('价格监控关着。'); return true }
-      if (!chatAllowed(msg.chatId, c)) { await reply('这个群还没加进价格监控白名单，先让主人在面板「平台 → 价格监控」里把群号加上。'); return true }
+      if (!chatAllowed(msg.chatId, c)) { await reply('这个群还没加进价格监控白名单，先让主人在面板「系统 → 价格监控」里把群号加上。'); return true }
       if (word === '查询价格' || word === '查价格' || word === '比价') {
         if (!c.guestQuery) { await reply('查价只有主人能用。'); return true }
         await reply(await cmdQuery(arg, msg))
@@ -911,13 +952,25 @@ export default {
     })
 
     // ---------- 给她用的工具（主人私聊 / 群聊都能用，写操作只认主人） ----------
-    api.tool(({ chat, sessionId }) => {
+    /**
+     * 这次工具调用是不是主人发起的。必须在 execute 里按当前会话算：
+     * api.tool 的工厂只在挂工具清单时调用一次，早于本轮 senders 写入，工厂里取到的 owner 是陈旧快照
+     * （挂载时没主人就永远拒绝，挂载时恰好有主人则群友也能借权）。
+     * turnSendersAllOwner 表示「本轮所有发言者都是主人」，主人和群友同轮时不能借权。
+     */
+    function ownerToolCall (exec) {
+      const sid = exec?.agent?.session?.id || exec?.session?.id || exec?.sessionId || ''
+      const hub = api.core?.hub
+      if (!sid || typeof hub?.turnSendersAllOwner !== 'function') return false
+      try { return hub.turnSendersAllOwner(sid) === true } catch (error) { return false }
+    }
+
+    api.tool(({ chat }) => {
       if (disposed || !chat || chat.kind === 'system') return []
       const c = conf()
       if (!c.enabled) return []
       // 白名单外的群连工具都不给，免得她在那儿「帮」群友查价
       if (!chatAllowed(chat.chatId, c)) return []
-      const owner = api.core.hub.turnHasOwner(sessionId)
       return [
         api.defineTool({
           name: 'price_query',
@@ -944,8 +997,8 @@ export default {
           description: '开始监控一件商品的价格，价格降了或者创下记录最低时提醒。只有主人能用。query 可以是商品名，也可以直接给什么值得买的链接。',
           properties: { query: { type: 'string', description: '商品名、关键词，或什么值得买的商品链接' } },
           required: ['query'],
-          execute: async ({ query }) => {
-            if (!owner) return { ok: false, message: '加价格监控要主人开口。' }
+          execute: async ({ query }, exec) => {
+            if (!ownerToolCall(exec)) return { ok: false, message: '加价格监控要主人开口。' }
             const out = await addWatch(String(query || '').trim(), chat.chatId, { creatorId: chat.userId })
             return { ok: out.ok, message: out.message }
           },
@@ -958,7 +1011,8 @@ export default {
         api.defineTool({
           name: 'price_watch_check',
           description: '马上检查一遍监控中的商品，返回有没有降价或历史最低。',
-          execute: async () => {
+          execute: async (_args, exec) => {
+            if (!ownerToolCall(exec)) return { ok: false, message: '检查价格监控要主人开口。' }
             const out = await runChecks({ manual: true })
             if (out.ok === false) return { ok: false, message: out.message }
             if (!out.checked) return { ok: true, message: out.message || '现在没有需要更新的商品。' }
@@ -970,10 +1024,10 @@ export default {
     api.rule(() => '你能查商品价格：别人问某件东西多少钱、哪里便宜时用 price_query；主人让你盯着某件商品降价时用 price_watch_add。价格来自什么值得买的公开爆料，是爆料里的价格，购买条件要看原文链接。你说「记录最低价」时指的是你开始监控之后见到的价格，不要说成全网历史最低。')
 
     // ---------- 定时检查 ----------
-    timer = setInterval(() => {
+    // 走 api.every：模块停了自动不跑，回调抛错由核心记进模块错误账；不用裸 setInterval。
+    stopChecks = api.every(60_000, () => {
       runChecks().catch((error) => log.warn('价格监控定时检查出错：' + (error && error.message ? error.message : error)))
-    }, 60000)
-    timer.unref?.()
+    }, '价格监控检查')
 
     // ---------- 面板接口 ----------
     const watchView = (w) => ({
@@ -1002,7 +1056,34 @@ export default {
       history: (w.history || []).slice(-30),
     })
 
-    api.route('/state', async () => {
+    /** 面板接口的同源闸（照同仓 history-vault / meme-wiki）：跨站请求或 Origin 与 Host 不一致直接拒。 */
+    function crossSite (req) {
+      const site = String(req?.headers?.['sec-fetch-site'] || '')
+      if (site === 'cross-site') return { ok: false, message: '不允许跨站调用' }
+      const origin = String(req?.headers?.origin || '')
+      if (origin) {
+        try {
+          if (new URL(origin).host !== String(req?.headers?.host || '')) return { ok: false, message: '不允许跨站调用' }
+        } catch (error) {
+          return { ok: false, message: '不允许跨站调用' }
+        }
+      }
+      return null
+    }
+
+    /** /state 只带当前 watches 用得到的记录：面板不读 records，别每 3 秒把整张表全量下发。 */
+    function recordsForWatches () {
+      const out = {}
+      for (const watch of state.watches) {
+        const key = watch && watch.key
+        if (key && state.records[key]) out[key] = state.records[key]
+      }
+      return out
+    }
+
+    api.route('/state', async (req) => {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
       const c = conf()
       return {
         ok: true,
@@ -1018,12 +1099,15 @@ export default {
         maxChecksPerRun: c.maxChecks,
         queryTopN: c.queryTopN,
         watches: state.watches.map(watchView),
-        records: state.records,
+        records: recordsForWatches(),
         stats: { watches: state.watches.length, alerts: Number(state.alerts) || 0, checkedAt: state.lastCheck, checks: Number(state.checks) || 0 },
       }
     })
 
     api.route('/search', async (req) => {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
+      if (req?.method !== 'POST') return { ok: false, message: '只支持 POST' }
       try {
         const body = await api.core.http.body(req)
         const raw = String((body && body.query) || '').trim()
@@ -1049,6 +1133,9 @@ export default {
     })
 
     api.route('/add', async (req) => {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
+      if (req?.method !== 'POST') return { ok: false, message: '只支持 POST' }
       try {
         const body = await api.core.http.body(req)
         const query = String((body && body.query) || '').trim()
@@ -1064,6 +1151,9 @@ export default {
     })
 
     api.route('/remove', async (req) => {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
+      if (req?.method !== 'POST') return { ok: false, message: '只支持 POST' }
       try {
         const body = await api.core.http.body(req)
         const id = String((body && body.id) || '').trim()
@@ -1078,6 +1168,9 @@ export default {
     })
 
     api.route('/check', async (req) => {
+      const blocked = crossSite(req)
+      if (blocked) return blocked
+      if (req?.method !== 'POST') return { ok: false, message: '只支持 POST' }
       let id = ''
       try {
         const body = await api.core.http.body(req)
