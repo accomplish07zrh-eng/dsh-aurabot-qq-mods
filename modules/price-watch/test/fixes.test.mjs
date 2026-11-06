@@ -199,6 +199,21 @@ test('写工具：宿主没有 turnSendersAllOwner 时 fail-closed', async () =>
   cleanup(h)
 })
 
+test('price_query 在 guestQuery 关闭时只给主人用', async () => {
+  const h = makeHarness({ settings: { guestQuery: false, whitelistGroups: '123456' } })
+  priceWatch.setup(h.api, { fetch: h.fetch })
+  const tools = h.rec.toolFactory({ chat: { kind: 'group', chatId: 'group:123456', userId: '20002' }, sessionId: 's1' })
+  const query = tools.find((tool) => tool.name === 'price_query')
+  const guest = await query.execute({ query: 'switch 2' }, { sessionId: 's1' })
+  assert.equal(guest.ok, false)
+  assert.equal(h.rec.fetches.length, 0, 'guestQuery 关闭时群友不能触发上游请求')
+  h.ownerSessions.add('s1')
+  const owner = await query.execute({ query: 'switch 2' }, { sessionId: 's1' })
+  assert.notEqual(owner.message, '查价只有主人能用（guestQuery 已关闭）。')
+  assert.ok(h.rec.fetches.length > 0, '主人仍然能查')
+  cleanup(h)
+})
+
 test('提醒落账：api.sendText 失败不占冷却 / 计数，成功后才记一次', async () => {
   const title = '任天堂 Switch 2 标准版'
   const key = productKey(title, 6)
@@ -240,6 +255,27 @@ test('提醒落账：api.sendText 失败不占冷却 / 计数，成功后才记�
   assert.equal(h.rec.sent.length, 2, '冷却中不再尝试发送')
   saved = readState(h)
   assert.equal(saved.watches[0].alerts, 1)
+  cleanup(h)
+})
+
+test('提醒发送失败不吞掉本次降价：下一次同价仍能补发', async () => {
+  const title = '任天堂 Switch 2 标准版'
+  const key = productKey(title, 6)
+  const h = makeHarness({ rows: [row(title, 2900)], sendTextResult: null, settings: { intervalMinutes: 10 } })
+  writeState(h, {
+    watches: [watchFixture({ key, title, query: title })],
+    records: { [key]: { lowest: 3200, lowestAt: 1, lastSeen: 1, title, url: 'https://www.smzdm.com/p/1', observations: 1 } },
+  })
+  const mod = priceWatch.setup(h.api, { fetch: h.fetch })
+  const first = await mod.check()
+  assert.equal(first.alerts, 0)
+  assert.equal(h.rec.sent.length, 1)
+  assert.equal(readState(h).watches[0].price, 3200, '发送失败要回滚展示价格，下一次才能补发')
+
+  h.rec.sendTextResult = { message_id: 'ok-retry' }
+  const second = await mod.check()
+  assert.equal(second.alerts, 1, '同一价格也要补发')
+  assert.equal(h.rec.sent.length, 2)
   cleanup(h)
 })
 
@@ -401,6 +437,9 @@ test('面板接口：跨站拒绝，写接口只收 POST', async () => {
   assert.equal((await state({ method: 'GET', headers: { origin: 'https://evil.example', host: '127.0.0.1:3080' } })).ok, false)
   assert.equal((await state({ method: 'GET', headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' } })).ok, true)
   assert.equal((await state({ method: 'GET', headers: {} })).ok, true)
+  const rebind = await state({ method: 'GET', headers: { origin: 'http://evil.example', host: 'evil.example' } })
+  assert.equal(rebind.ok, false, 'DNS rebinding 的 Host 必须被拒')
+  assert.match(rebind.message, /rebinding|Host/)
 
   for (const path of ['/search', '/add', '/remove', '/check']) {
     const out = await h.rec.routes.get(path)({ method: 'GET', headers: {}, __body: {} })

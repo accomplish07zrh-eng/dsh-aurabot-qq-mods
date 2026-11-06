@@ -741,6 +741,15 @@ export default {
       watch.failCount = Math.min(20, (Number(watch.failCount) || 0) + 1)
     }
 
+    /** 提醒没真正发出去时，把本次 checkOne 推进的展示状态回滚，下一次同价还能补发。 */
+    function restoreAlertState (watch, out) {
+      const before = out && out.before
+      if (!before) return
+      if (before.price !== undefined) watch.price = before.price
+      if (before.lowest !== undefined) watch.lowest = before.lowest
+      if (before.quality !== undefined) watch.quality = before.quality
+    }
+
     /** 检查所有到期的监控，把提醒发到当初添加它的聊天。 */
     async function runChecks ({ only = null, manual = false } = {}) {
       const c = conf()
@@ -786,9 +795,11 @@ export default {
             }
             if (out.alerted && out.message) {
               if (api.config().dryRun) {
+                restoreAlertState(watch, out)
                 log.info('试运行：本该发价格提醒 ' + watch.title.slice(0, 20) + '，现在 ' + priceText(watch.price))
               } else if (!chatAllowed(watch.chatId, c)) {
-                // 群被移出白名单后不再往那儿发，也不占用「已提醒」计数
+                // 群被移出白名单后不再往那儿发，也不占用「已提醒」计数；保留降价下次补发
+                restoreAlertState(watch, out)
                 log.info('价格监控：' + watch.chatId + ' 已不在白名单，跳过提醒')
               } else {
                 let ok = null
@@ -809,7 +820,9 @@ export default {
                   sent.push({ id: watch.id, title: watch.title, message: out.message })
                   log.info('价格提醒已发到 ' + watch.chatId + '：' + watch.title.slice(0, 30) + ' ' + priceText(watch.price))
                 } else {
-                  log.warn('价格提醒没发出去（不占冷却和计数）：' + watch.chatId)
+                  // 发送失败：不占冷却/计数，同时回滚展示价格，下一次同价还能补发
+                  restoreAlertState(watch, out)
+                  log.warn('价格提醒没发出去（不占冷却和计数，下次可补发）：' + watch.chatId)
                 }
               }
             }
@@ -981,7 +994,8 @@ export default {
           description: '查询一件商品在多个平台的价格，返回按平台分组的最低价和链接。别人问「这个多少钱」「帮我比个价」时用。query 可以是商品名、关键词，也可以直接给什么值得买的链接。',
           properties: { query: { type: 'string', description: '商品名、关键词，或什么值得买的商品链接，比如 switch 2、索尼降噪耳机' } },
           required: ['query'],
-          execute: async ({ query }) => {
+          execute: async ({ query }, exec) => {
+            if (!conf().guestQuery && !ownerToolCall(exec)) return { ok: false, message: '查价只有主人能用（guestQuery 已关闭）。' }
             const text = String(query || '').trim()
             if (!text) return { ok: false, message: '要查什么商品？' }
             try {
@@ -1060,6 +1074,22 @@ export default {
       history: (w.history || []).slice(-30),
     })
 
+    /** 面板 Host 白名单：回环 / localhost / IP 字面量 / 配置的对外域名；挡 DNS rebinding。 */
+    function panelHostAllowed (req) {
+      const raw = String(req?.headers?.host || '').trim().toLowerCase()
+      if (!raw) return true
+      const host = raw.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').replace(/\.$/, '')
+      if (!host) return true
+      if (host === 'localhost' || host.endsWith('.localhost')) return true
+      if (host === '::1' || host === '0.0.0.0') return true
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
+      if (/^[0-9a-f:.]+$/i.test(host) && host.includes(':')) return true
+      const cfg = api.config() || {}
+      const publicHost = String((cfg.security && cfg.security.publicHostname) || '')
+        .trim().toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '').replace(/\.$/, '')
+      return Boolean(publicHost) && host === publicHost
+    }
+
     /** 面板接口的同源闸（照同仓 history-vault / meme-wiki）：跨站请求或 Origin 与 Host 不一致直接拒。 */
     function crossSite (req) {
       const site = String(req?.headers?.['sec-fetch-site'] || '')
@@ -1072,6 +1102,7 @@ export default {
           return { ok: false, message: '不允许跨站调用' }
         }
       }
+      if (!panelHostAllowed(req)) return { ok: false, message: '不允许这个 Host 访问（疑似 DNS rebinding）' }
       return null
     }
 
