@@ -1,0 +1,14 @@
+{
+  "id": "starmap",
+  "name": "星图",
+  "version": "1.0.0",
+  "description": "把 Aurabot 自己的记忆渲染成可交互的 3D 星图；点星星看正文，不依赖 congling。",
+  "category": "tool",
+  "tags": ["星图", "记忆", "识海", "3D"],
+  "author": "zcx1021",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": ["filesystem", "plugin-internals"]
+}
