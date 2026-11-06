@@ -849,6 +849,12 @@ test('面板写接口只收 POST；/approve 必须显式 id 和 true/false；跨
     const remote = await stateRoute(panelReq('GET', {}, { remoteAddress: '10.0.0.5' }))
     assert.equal(remote.ok, false)
     assert.match(remote.message, /本机/)
+    // DNS rebinding：Origin 与 Host 相同，但 Host 是攻击者域名，必须被 Host 白名单拒绝
+    const rebind = await stateRoute(panelReq('GET', {}, { headers: { host: 'evil.example', origin: 'http://evil.example' } }))
+    assert.equal(rebind.ok, false)
+    assert.match(rebind.message, /rebinding|Host/)
+    const rebindLedger = await routes.get('/ledger')(panelReq('POST', { scope: '今天' }, { headers: { host: 'evil.example', origin: 'http://evil.example' } }))
+    assert.equal(rebindLedger.ok, false)
 
     const state = await stateRoute(panelReq('GET'))
     assert.equal(state.ok, true)
@@ -871,6 +877,8 @@ test('/state 和 /ledger 不返回管理员 QQ、原始打赏人 QQ、绝对路�
     await commands.get('打赏').run('15', messages({}))
     const direct = await mod.recordPayment({ amount: 5, note: '无昵称', chatId: 'group:' + GROUP, groupId: GROUP, payer: '30000003', payerName: '', source: '测试', byAdmin: true })
     assert.equal(direct.ok, true)
+    const beg = await routes.get('/beg')(panelReq('POST', {}))
+    assert.equal(beg.ok, true, beg.message)
 
     const state = await routes.get('/state')(panelReq('GET'))
     assert.ok(state.admins.length >= 2)
@@ -888,6 +896,9 @@ test('/state 和 /ledger 不返回管理员 QQ、原始打赏人 QQ、绝对路�
     assert.equal(state.qr.items[0].file, undefined, '解析出的绝对路径不能进响应')
     const pending = state.approvals.find((a) => a.id === '1')
     assert.equal(pending.payer, '****0009')
+    assert.doesNotMatch(JSON.stringify(state.approvals), /90000009|30000003/, '待确认里的 requester / payer 不能出现原始 QQ')
+    assert.ok(state.pendingThanks.length >= 1)
+    for (const key of state.pendingThanks) assert.doesNotMatch(key, /private:\d{5,12}$/, 'pendingThanks 的私聊 QQ 必须脱敏')
     const row = state.rows.find((r) => r.amount === 5)
     assert.equal(row.payer, '****0003')
 

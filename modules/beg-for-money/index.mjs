@@ -887,12 +887,14 @@ export default {
         if (qrPathList().length) log.warn('收款码不可用：' + qr.reason)
         return { ok: false, message: qr.reason }
       }
+      const now = nowMs()
+      // 先清过期游标再读：否则 6 小时没动的聊天会先拿到旧 index，发送后才被 prune 掉。
+      pruneState(now)
       // 配了好几张就轮着发：第一次发第一张，第二次第二张，避免每次都刷屏刷同样的图
       const cursorKey = target
       const cursor = state.qrCursor.get(cursorKey)
       const index = ((cursor && Number(cursor.index)) || 0) % qr.files.length
       const chosen = qr.files[index]
-      const now = nowMs()
       const last = state.lastBeg.get(target)
       if (last !== undefined && now - last < c.cooldownSeconds * 1000) {
         const left = Math.ceil((c.cooldownSeconds * 1000 - (now - last)) / 1000)
@@ -1335,10 +1337,27 @@ export default {
       return null
     }
 
+    /** 面板 Host 白名单：回环 / localhost / IP 字面量 / 配置的对外域名；挡 DNS rebinding。 */
+    function panelHostAllowed (req) {
+      const raw = String(req?.headers?.host || '').trim().toLowerCase()
+      if (!raw) return true
+      const host = raw.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').replace(/\.$/, '')
+      if (!host) return true
+      if (host === 'localhost' || host.endsWith('.localhost')) return true
+      if (host === '::1' || host === '0.0.0.0') return true
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
+      if (/^[0-9a-f:.]+$/i.test(host) && host.includes(':')) return true
+      const cfg = api.config() || {}
+      const publicHost = String((cfg.security && cfg.security.publicHostname) || '')
+        .trim().toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '').replace(/\.$/, '')
+      return Boolean(publicHost) && host === publicHost
+    }
+
     /** 面板接口只接受本机回环：DNS rebinding / 任意本机网页不能读账本。 */
     function panelGuard (req) {
       const blocked = crossSite(req)
       if (blocked) return blocked
+      if (!panelHostAllowed(req)) return { ok: false, message: '不允许这个 Host 访问（疑似 DNS rebinding）' }
       const addr = String(req?.socket?.remoteAddress || '')
       // 没有 socket 的是宿主内部调用 / 测试；真实 HTTP 请求一定有。
       if (addr && !LOOPBACK_RE.test(addr)) return { ok: false, message: '面板接口只接受本机请求' }
@@ -1350,6 +1369,19 @@ export default {
       const s = String(raw || '').trim()
       if (!/^\d+$/.test(s)) return ''
       return '****' + s.slice(-4)
+    }
+
+    /** 纯 QQ 号脱敏；昵称原样保留。 */
+    function maskQQish (raw) {
+      const s = String(raw || '').trim()
+      return /^\d{5,12}$/.test(s) ? maskQQ(s) : s
+    }
+
+    /** 聊天标识里的私聊 QQ 脱敏，群号保留。 */
+    function maskChatId (raw) {
+      const s = String(raw || '')
+      const m = s.match(/^private:(\d{5,12})$/)
+      return m ? 'private:' + maskQQ(m[1]) : s
     }
 
     /** 账本行里的打赏人：有昵称用昵称，没有昵称才用脱敏后的 QQ。 */
@@ -1424,13 +1456,14 @@ export default {
         thanksWindowSeconds: c.thanksWindowSeconds,
         linkImpressionCard: c.linkImpressionCard,
         impressionCard: Boolean(api.use('impression-card')),
-        pendingThanks: [...state.pendingThanks.keys()],
+        // private:<QQ> / 纯 QQ 都脱敏；群号保留，面板需要区分群。
+        pendingThanks: [...state.pendingThanks.keys()].map(maskChatId),
         approvals: [...approvals.values()].sort((a, b) => a.created - b.created).map((rec) => ({
           id: rec.id,
           amount: rec.amount,
           note: rec.note,
           groupName: rec.groupName,
-          requester: rec.requester,
+          requester: maskQQish(rec.requester),
           payer: maskQQ(rec.payer),
           created: rec.created,
         })),
