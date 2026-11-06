@@ -46,3 +46,17 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+
+## pet-client/memes（梗图）
+- 画面是「大肥鱼」形象的衍生创作，与形象包同许可：**CC BY-NC-SA 4.0**
+- 仅随本模块分发，用于个人非商业用途；商用需先取得形象作者许可
+- 文件名与用法说明见 pet-client/memes/descriptions.json
+
+## pet-client/fonts/上首软糖体.ttf（字体）
+- 字体名：上首软糖体（免费商用字体）
+- 来源：网络公开渠道获取；如字体版权方要求，可移除该文件，模块会自动回退到系统字体（面板「气泡用自定义字体」开关）
+- 用户也可以自行替换该文件为任意 TTF
+
+## pet-client/sound/click-duck.wav（点击音效）
+- 模块自带的短音效素材，随模块 MIT 分发
