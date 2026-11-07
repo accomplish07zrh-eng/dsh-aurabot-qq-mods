@@ -9,7 +9,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { HeyboxClient, HeyboxError, cosSign, WEB_BASE, TOPICS } from './api.mjs'
+import { HeyboxClient, HeyboxError, cosSign, newDeviceId, WEB_BASE, TOPICS } from './api.mjs'
 import { POST_STYLES, DEFAULT_POST_STYLE, styleOf, stylePrompt } from './styles.mjs'
 import { startQrLogin, pollQrLogin, verifyCookie } from './qr.mjs'
 import { createVerifier } from './verify.mjs'
@@ -21,6 +21,8 @@ const CRED_DIR = path.join(HOME, '.heybox-ai')
 const CRED_FILE = path.join(CRED_DIR, 'credentials.json')
 
 const DEFAULT_STATE = {
+  // 本机固定的设备指纹：首次运行时随机生成并落盘，不跟别人共用
+  deviceId: '',
   account: { checkedAt: 0, nickname: '', heyboxId: '', loggedIn: false, message: '' },
   quota: { date: '', like: 0, comment: 0, post: 0, browse: 0, share: 0 },
   history: [],
@@ -172,7 +174,7 @@ export function createHeybox({ getConfig, setCookie, hub, memory, log, proactive
 
   function getClient() {
     if (!client) {
-      client = clientFactory({ cookie: cookie(), risk: readState().risk, onRisk: saveRisk, now })
+      client = clientFactory({ cookie: cookie(), deviceId: ensureDeviceId(), risk: readState().risk, onRisk: saveRisk, now })
       if (disposed) client.dispose()
     } else client.cookie = cookie()
     return client
@@ -193,6 +195,16 @@ export function createHeybox({ getConfig, setCookie, hub, memory, log, proactive
       fs.writeFileSync(stateFile, JSON.stringify(next, null, 2))
       return true
     } catch (e) { log?.warn?.('写小黑盒状态失败：' + e.message); return false }
+  }
+
+  /** 设备指纹：每台机器随机生成一次并存进状态文件，重启后保持不变 */
+  function ensureDeviceId() {
+    const st = readState()
+    if (/^[0-9a-f]{32}$/.test(String(st.deviceId || ''))) return st.deviceId
+    const id = newDeviceId()
+    st.deviceId = id
+    writeState(st)
+    return id
   }
 
   function quota() {
