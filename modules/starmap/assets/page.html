@@ -509,11 +509,14 @@
   async function openNode(n){
     sel=n; panel.classList.add('open');
     pTitle.textContent=n.desc?n.desc:n.label;
-    pMeta.innerHTML=
-      `<span>${TYPE_CN[n.type]||n.type}</span>`+
-      `<span>被想起 <b>${n.uses}</b> 次</span>`+
-      `<span>${n.chars} 字</span>`+
-      (n.updated?`<span>${String(n.updated).split(' ')[0]}</span>`:'');
+        pMeta.textContent='';
+    const meta=(text)=>{ const s=document.createElement('span'); s.textContent=text; pMeta.appendChild(s); };
+    meta(TYPE_CN[n.type]||n.type);
+    const use=document.createElement('span'); use.append('被想起 ');
+    const b=document.createElement('b'); b.textContent=String(n.uses);
+    use.append(b,' 次'); pMeta.appendChild(use);
+    meta(`${n.chars} 字`);
+    if(n.updated) meta(String(n.updated).split(' ')[0]);
     pBody.textContent='…';
     if(n.type==='session'){
       pBody.textContent=n.desc||'这是一段对话的枢纽，周围的星是同一次聊天里留下来的记忆。';
