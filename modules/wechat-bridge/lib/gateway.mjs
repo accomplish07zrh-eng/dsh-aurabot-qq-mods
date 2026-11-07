@@ -20,7 +20,7 @@ export function gatewaySettings(settings) {
       url.username || url.password || url.search || url.hash) return null
     const account = String(settings.account ?? '').trim()
     const tokenFile = String(settings.tokenFile ?? '').trim()
-    if (!/^[\w][\w.-]{0,127}$/.test(account) || !isAbsolute(tokenFile)) return null
+    if (!/^[\w][\w.-]{0,127}$/.test(account) || !isAbsolute(tokenFile) || /^[\\/]{2}/.test(tokenFile)) return null
     return { url: url.origin, account, tokenFile }
   } catch {
     return null
@@ -50,7 +50,10 @@ export async function* readEvents(response) {
       buffer = buffer.slice(boundary.index + boundary[0].length)
       const data = frame.split(/\r?\n/).filter((line) => line.startsWith('data:'))
         .map((line) => line.slice(5).trimStart()).join('\n')
-      if (data) yield JSON.parse(data)
+      if (!data) continue
+      let event
+      try { event = JSON.parse(data) } catch { continue }
+      if (event && typeof event === 'object' && !Array.isArray(event)) yield event
     }
     if (buffer.length > 512 * 1024) throw new Error('Agent WeChat 事件过大')
   }
@@ -129,7 +132,7 @@ export async function openGateway(config, signal) {
         if (error.status === 404 || error.status === 410) return null
         throw error
       }
-      if (message?.accountId !== config.account || message.threadId !== thread ||
+      if (message?.id !== event.data.messageId || message.accountId !== config.account || message.threadId !== thread ||
         message.senderId !== thread || message.direction !== 'incoming' || message.recall || message.type !== 1) return null
       const text = typeof message.body === 'string' ? message.body.trim().slice(0, 2000) : ''
       return text ? {

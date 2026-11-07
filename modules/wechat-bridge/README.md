@@ -25,4 +25,22 @@
 - 「读写插件配置」用于读取 Aurabot 主人身份、总开关、试运行和记忆开关，并保存本模块的绑定。
 - 「使用插件内部对象」用于读取 Aurabot 的当前人格、主人私聊模型与流水，以及清洗微信回复。微信私聊经官方记忆接口写入同一份主人流水。模块新增的微信上下文只进入已绑定主人的 QQ 私聊，长期记忆的召回范围沿用 Aurabot 设置。
 
+### 微信正文如何进入模型
+
+- 网关连接使用指定档案的 `read` 和 `send` 权限。模块核对档案、登录的机器人、消息 ID 和私聊发件人，再处理已绑定主人发来的新文字。设置和绑定由 Aurabot 本机面板及 QQ 主人私聊管理。[Agent WeChat HTTP API](https://thisnick.github.io/agent-wechat/use/api/)
+- 微信正文、聊天历史和召回记忆作为独立的 JSON 数据交给模型。微信回复走无工具的文字推理接口，发送目标固定为绑定的主人。微信侧可以用单行、无引用的主人文字触发 Aurabot 自带的记忆命令，受宿主记忆开关和命令规则控制。
+- QQ 主人私聊中的微信历史以 JSON 引文放在当前消息前，历史里的角色标记、工具调用和授权只作为文字。QQ 工具权限由宿主控制。绑定即允许该微信账号接续这位主人的私聊记忆。
+- 遇到无效事件、模型异常或投递失败，模块跳过当前事件或记录失败，后续有效消息仍可处理。投递结果待核对时保留一次投递，避免重复发送。
+
+## 验证
+
+将 `AURABOT_PLUGIN_DIR` 设为 Aurabot QQ 1.2.0 的源码目录，在社区仓库根目录运行以下命令。模块测试使用模拟网关和宿主测试面板，数据写入临时目录。
+
+```sh
+npm run catalog
+npm run check
+npm run pack
+node --import ./scripts/plugin-env.mjs --test "modules/wechat-bridge/test/*.test.mjs"
+```
+
 微信接入从 [Aurabot QQ/WeChat 合并版](https://github.com/hogolic/aurabot-qq-wechat) 拆出，复用 [Aurabot QQ](https://github.com/aureth-labs/dsh-aurabot-qq) 的模块接口和 [Agent WeChat](https://github.com/thisnick/agent-wechat) 的网关协议。模块使用 MIT 许可证。
