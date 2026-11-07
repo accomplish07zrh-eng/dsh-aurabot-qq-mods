@@ -1,0 +1,24 @@
+{
+  "id": "room3d",
+  "name": "房间",
+  "version": "0.3.0",
+  "description": "一个 3D 小屋：小小柒在屋里走动、干活、发呆；场景默认空着，家具库 81 种随便摆。",
+  "category": "desktop",
+  "tags": [
+    "3D",
+    "房间",
+    "桌宠",
+    "小屋"
+  ],
+  "author": "zcx1021",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.0",
+  "requires": [],
+  "capabilities": [
+    "filesystem",
+    "plugin-internals",
+    "network"
+  ],
+  "homepage": "https://github.com/aureth-labs/dsh-aurabot-qq-mods"
+}
