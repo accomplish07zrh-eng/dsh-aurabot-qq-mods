@@ -1,4 +1,4 @@
-﻿// 自己写的模块：星露谷（接 Blind Whale Farmer 模组）
+// 自己写的模块：星露谷（接 Blind Whale Farmer 模组）
 //
 // 它不是"另一个 AI 在玩"，也不是把别人的插件搬进来当外壳。
 // 游戏那边的 SMAPI 模组只做两件事：把画面翻成文字（状态、背包、地图、坐标、作物），
@@ -16,13 +16,15 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { execFile, execFileSync } from 'node:child_process'
 import { join } from 'node:path'
+import { parseSse, inSaveGame, looksLikeBadSelfReport, trim, parseMinutes, newestSaveMtime } from './lib/logic.mjs'
 
 export default {
   id: 'stardew',
   api: 1,
   name: '星露谷',
-  version: '0.1.0',
-  description: '在大肥鱼自己的会话里玩《星露谷物语》：读游戏文字状态、自己决定做什么，再让 SMAPI 模组去执行。需要游戏开着并装了 Blind Whale Farmer 模组。',
+  version: '1.0.0',
+  description: '让她自己在后台玩《星露谷物语》：读游戏文字状态、自己决定做什么，再让 SMAPI 模组去执行。需要游戏开着并装了 Blind Whale Farmer 模组。',
+  panel: 'panel.js',
 
   defaults: {
     port: 18080,
@@ -59,10 +61,9 @@ export default {
     // 为什么要有：SMAPI 不热加载模组，游戏必须在模组装好之后启动；而且启动后停在标题画面，
     // MCP 已经在听，但 get_state 会一直报「还没进入存档」。所以「自己玩」第一步是：
     // 没有进程就拉起 StardewModdingAPI.exe → 等 18080 通 → 点进存档。
-    // 逻辑都在模块自带的 stardew-launch.ps1 里（窗口操作离不开 PowerShell）。
+    // 逻辑都在 scripts/stardew-launch.ps1 里（窗口操作离不开 PowerShell）。
 
-    // 脚本跟模块放一起（api.dir 是模块快照目录），这样装到哪都能找到
-    const launchScript = () => join(api.dir, 'stardew-launch.ps1')
+    const launchScript = () => join(api.dir, 'assets', 'stardew-launch.ps1')
 
     const runLaunchScript = (opts = {}) => new Promise((resolve) => {
       const script = launchScript()
@@ -104,17 +105,6 @@ export default {
       } catch { return false }
     }
 
-    /** 从 SSE 文本里取出 JSON-RPC 回复（忽略 ": keep-alive" 这类注释行）。 */
-    function parseSse(text) {
-      for (const block of String(text).split(/\r?\n\r?\n/)) {
-        const data = block.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trimStart()).join('\n')
-        if (!data) continue
-        let msg
-        try { msg = JSON.parse(data) } catch { continue }
-        if (msg && ('result' in msg || 'error' in msg)) return msg
-      }
-      throw new Error('游戏的回复里没有结果（连接可能中途断了）')
-    }
 
     /** 发一条 JSON-RPC 给游戏里的 MCP 服务器。 */
     async function mcp(method, params, signal) {
@@ -131,12 +121,6 @@ export default {
       return body.result
     }
 
-    /** 把 HTML 化的状态压一压：动作记录太长时只留最近的，别把上下文撑爆。 */
-    function trim(text, limit = 12000) {
-      const s = String(text ?? '')
-      if (s.length <= limit) return s
-      return s.slice(0, 1500) + `\n……（中间省略 ${s.length - limit} 字）……\n` + s.slice(-(limit - 1500))
-    }
 
     const TOOL = 'stardew_game'
 
@@ -219,7 +203,7 @@ export default {
         try {
           const text = await stateText()
           if (!text) return { ok: false, message: '游戏没回话' }
-          if (/还没有进入存档|在标题画面/.test(text)) {
+          if (!inSaveGame(text)) {
             return { ok: false, message: '游戏开着但停在标题画面，还没读存档。要玩的话跟我说一声，我来弄' }
           }
           if (want === 'notes') {
@@ -344,7 +328,7 @@ export default {
      */
     async function ensureGameReady() {
       // 已经进档：直接开工
-      if (await stateText().then((t) => Boolean(t) && !/还没有进入存档|在标题画面/.test(t)).catch(() => false)) {
+      if (await stateText().then((t) => inSaveGame(t)).catch(() => false)) {
         return { ok: true, note: '游戏本来就在存档里' }
       }
       if (!(await portAlive())) {
@@ -356,7 +340,7 @@ export default {
         await runLaunchScript({ launch: false, click: true })
         for (let w = 0; w < 8; w++) {
           await wait(4000)
-          const okIn = await stateText().then((t) => Boolean(t) && !/还没有进入存档|在标题画面/.test(t)).catch(() => false)
+          const okIn = await stateText().then((t) => inSaveGame(t)).catch(() => false)
           if (okIn) return { ok: true, note: `已进存档（第 ${i + 1} 次点成功）` }
         }
       }
@@ -430,15 +414,7 @@ export default {
         // 睡觉必须「存档文件真更新了」才算数：sleep 说成功 ≠ 存下来了。
         // 2026-11-07 踩过：日志全说睡了，存档却停在两小时前。
         const saveDir = join(process.env.APPDATA || '', 'StardewValley', 'Saves')
-        const newestSave = () => {
-          try {
-            let best = 0
-            for (const d of readdirSync(saveDir)) {
-              try { const m = statSync(join(saveDir, d, d)).mtimeMs; if (m > best) best = m } catch {}
-            }
-            return best
-          } catch { return 0 }
-        }
+        const newestSave = () => newestSaveMtime(saveDir, readdirSync, (p) => statSync(p).mtimeMs)
         const beforeSave = newestSave()
         try {
           await mcp('tools/call', { name: 'sleep', arguments: {} }, AbortSignal.timeout(180_000))
@@ -455,7 +431,7 @@ export default {
         saveSelf({ ...fin, running: false, slept, closed })
         const playedMin = Math.max(1, Math.round((Date.now() - now0) / 60_000))
         // 模型自述里只要提到「没进存档 / 标题画面 / 连不上」就整段丢掉，别把假失败带给主人
-        const saidBad = /标题画面|进入存档|没进存档|连不上|开局失败/.test(lastSay || '')
+        const saidBad = looksLikeBadSelfReport(lastSay)
         const tail = lastSay && !saidBad ? `\n\n${lastSay.slice(0, 400)}` : ''
         const extra = [slept ? '' : '（存档没睡成，下次得手动存档）', closed ? '' : '（游戏没关掉）'].filter(Boolean).join('')
         report(`【星露谷】玩了 ${playedMin} 分钟，跑了 ${round} 轮，${slept ? '已存档' : '没存成'}、${closed ? '游戏关掉了' : '游戏还开着'}。${extra}${tail}`)
@@ -469,16 +445,7 @@ export default {
       name: '自己玩',
       aliases: ['自己玩吧'],
       desc: '让她自己去玩星露谷：/自己玩 10（分钟，只写数字；不写默认 30）',
-      // arg 可能是 "5"、"5分钟"、"半个小时"、"30 分钟" 之类，尽量认数字
-      run: async (arg) => {
-        const raw = String(arg ?? '').trim()
-        let n = 0
-        const m = raw.match(/\d+/)
-        if (m) n = Number(m[0])
-        else if (/半(个)?小时/.test(raw)) n = 30
-        else if (/一(个)?小时/.test(raw)) n = 60
-        return startSelfPlay(n || 30)
-      },
+      run: async (arg) => startSelfPlay(parseMinutes(arg))
     })
 
     api.command({
